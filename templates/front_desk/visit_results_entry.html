@@ -6,9 +6,9 @@
   <p class="muted">{{ visit['gender'] }} · {{ visit['age'] }} {{ visit['age_unit'] }} · {{ visit['created_at'] }}</p>
   <a class="btn small secondary" href="{{ url_for('results_list') }}">{{ t('back') }}</a>
   <button type="button" class="btn small secondary print-link" id="printAllLink"
-     onclick="openReportModal('{{ url_for('print_visit_results_bundle', visit_id=visit['id']) }}', 'طباعة كل النتائج المكتملة')">🖨 طباعة كل النتائج المكتملة</button>
+     onclick="lisSaveThenPrint('{{ url_for('print_visit_results_bundle', visit_id=visit['id']) }}', 'طباعة كل النتائج المكتملة')">🖨 طباعة كل النتائج المكتملة</button>
   <button type="button" class="btn small secondary"
-     onclick="openReportModal('{{ url_for('print_combined_panel', visit_id=visit['id']) }}', 'اللوحة المجمّعة')"
+     onclick="lisSaveThenPrint('{{ url_for('print_combined_panel', visit_id=visit['id']) }}', 'اللوحة المجمّعة')"
      title="يجمع تحاليل الكيمياء/الفايروسات/الهرمونات/الفيتامينات وأي قسم آخر بورقة A4 وحدة، مرتّبة حسب القسم">🧾 طباعة اللوحة المجمّعة</button>
   {% if visit['phone'] %}
   <form method="POST" action="{{ url_for('whatsapp_send_visit', visit_id=visit['id']) }}"
@@ -72,7 +72,11 @@
 
 <script>
   function openReportModal(url, title) {
-    document.getElementById('reportModalFrame').src = url;
+    // cache-buster: حتى بحالة "hasProtected" (تحت) اللي ما تسوي حفظ صامت
+    // قبل الفتح، نضمن الطلب يوصل طازج للسيرفر دائماً بدل ما يرجّع
+    // المتصفح نسخة iframe مخزّنة قديمة لنفس الرابط.
+    var bust = url + (url.indexOf('?') === -1 ? '?' : '&') + '_ts=' + Date.now();
+    document.getElementById('reportModalFrame').src = bust;
     document.getElementById('reportModalTitle').textContent = title ? ('🖨 ' + title) : '🖨 معاينة الطباعة';
     document.getElementById('reportModalOverlay').style.display = 'flex';
   }
@@ -90,6 +94,61 @@
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closeReportModal();
   });
+</script>
+
+<script>
+  // ------------------------------------------------------------------
+  // المطلوب 5: الطباعة تستخدم دائماً آخر قيم مدخلة بالنموذج، حتى لو ما
+  // ضُغط زر "💾 حفظ" أصلاً — بدل ما تفتح المعاينة على طول (وتطلع فارغة
+  // لأن النتائج لسا ما انحفظت بقاعدة البيانات)، أي زر طباعة بهذي الصفحة
+  // (المفرد 🖨️ لكل بطاقة، أو الزرين أعلى الصفحة) يحفظ أولاً بصمت
+  // (fetch بالخلفية لنفس رابط الصفحة، بدون أي تنقّل/إعادة تحميل)، وبعد ما
+  // يخلص الحفظ فعلياً يفتح نافذة المعاينة.
+  //
+  // استثناء واحد فقط: لو فيه نتيجة مكتملة/معتمدة أصلاً بالصفحة (نفس شرط
+  // hasProtected بالسكربت تحت)، الحفظ الصامت يحتاج بوابة يوزر/باسورد
+  // (نفس حماية زر 💾 العادي) وما نقدر نسويها عبر fetch بالخلفية — بهذي
+  // الحالة فقط نفتح المعاينة مباشرة بدون حفظ صامت (نفس السلوك القديم).
+  //
+  // تنبيه عدم الحفظ عند إغلاق الصفحة: أي تغيير بأي حقل نتيجة يفعّل علم
+  // "تعديل غير محفوظ" (lisDirty)، فيطلع تحذير المتصفح القياسي لو حاول
+  // المستخدم يسكّر التبويب/يغادر الصفحة قبل ما يضغط "💾 حفظ" (أو قبل ما
+  // ينجح الحفظ الصامت هذا).
+  // ------------------------------------------------------------------
+  var lisDirty = false;
+  (function () {
+    var form = document.getElementById('visitResultsForm');
+    if (!form) return;
+    form.addEventListener('input', function () { lisDirty = true; });
+    form.addEventListener('change', function () { lisDirty = true; });
+    form.addEventListener('submit', function () {
+      // الحفظ العادي (زر 💾) قد يتوقف مؤقتاً ببوابة يوزر/باسورد (راجع
+      // السكربت أسفل الصفحة) قبل ما ينجح فعلياً؛ بأي الحالتين هذا تنقّل
+      // حقيقي للصفحة فينعدم داعي لتحذير "إغلاق بدون حفظ" لحظتها.
+      lisDirty = false;
+    });
+  })();
+  window.addEventListener('beforeunload', function (e) {
+    if (!lisDirty) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
+  function lisSaveThenPrint(url, title) {
+    var form = document.getElementById('visitResultsForm');
+    var hasProtected = form && form.querySelectorAll('.badge-Completed, .badge-Verified').length > 0;
+    if (!form || hasProtected) {
+      // فيه نتيجة محمية بكلمة مرور بهذي الصفحة — ما نقدر نحفظ صامت
+      // بالخلفية (يحتاج تأكيد يوزر/باسورد تفاعلي)، نفتح المعاينة مباشرة
+      // بالقيم المحفوظة حالياً بقاعدة البيانات فقط (نفس السلوك القديم).
+      openReportModal(url, title);
+      return;
+    }
+    fetch(window.location.href, { method: 'POST', body: new FormData(form) })
+      .then(function () { lisDirty = false; })
+      .catch(function () { /* صامت — نفتح المعاينة بأي حال أدناه */ })
+      .then(function () { openReportModal(url, title); });
+  }
 </script>
 
 <script>
@@ -241,7 +300,7 @@
         <h4 style="margin:0;">{{ ot['test_name'] }}</h4>
         <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
           <button type="submit" class="btn small" title="حفظ كل نتائج هذه الصفحة (كل التحاليل الظاهرة، مو هذا التحليل بس)">💾 {{ t('save') }}</button>
-          <button type="button" class="btn small secondary" onclick="openReportModal('{{ url_for('print_report', order_test_id=ot['id']) }}')" title="طباعة تقرير هذا التحليل فقط">🖨️</button>
+          <button type="button" class="btn small secondary" onclick="lisSaveThenPrint('{{ url_for('print_report', order_test_id=ot['id']) }}')" title="طباعة تقرير هذا التحليل فقط (يحفظ القيم المدخلة حالياً تلقائياً قبل الطباعة)">🖨️</button>
           <span class="badge badge-{{ ot['status'] }}">{{ ot['status'] }}</span>
         </div>
       </div>
@@ -587,16 +646,17 @@
       if (!hasProtected) return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (!confirm('توجد نتيجة مكتملة أو معتمدة ضمن هذي الزيارة -- تعديلها محمي بكلمة مرور خاصة حتى لو كنت أدمن. متابعة؟')) return;
-      var password = prompt('أدخل كلمة مرور الحماية (نفس كلمة مرور "تحليل مجاني") لتأكيد التعديل:');
+      if (!confirm('توجد نتيجة مكتملة أو معتمدة ضمن هذي الزيارة -- تعديلها يحتاج دخول مسؤول/مشرف المختبر حتى لو كنت أدمن. متابعة؟')) return;
+      var username = prompt('اسم مستخدم حساب مسؤول/مشرف المختبر لتأكيد التعديل:');
+      if (username === null) return;
+      var password = prompt('كلمة مرور نفس الحساب:');
       if (password === null) return;
-      var personName = prompt('اسمك (يُسجَّل فقط للمراجعة):') || '';
+      var uInput = document.createElement('input');
+      uInput.type = 'hidden'; uInput.name = 'gate_username'; uInput.value = username;
+      form.appendChild(uInput);
       var pInput = document.createElement('input');
       pInput.type = 'hidden'; pInput.name = 'gate_password'; pInput.value = password;
       form.appendChild(pInput);
-      var nInput = document.createElement('input');
-      nInput.type = 'hidden'; nInput.name = 'gate_person_name'; nInput.value = personName;
-      form.appendChild(nInput);
       gateHandled = true;
       if (form.requestSubmit) { form.requestSubmit(); } else { form.submit(); }
     }, true);

@@ -443,9 +443,12 @@ CREATE TABLE IF NOT EXISTS whatsapp_sends (
 CREATE TABLE IF NOT EXISTS digital_stamps (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     label TEXT NOT NULL,                 -- اسم مختصر يظهر بالقائمة المنسدلة، مثلاً "ختم د. خليل حمود"
-    kind TEXT NOT NULL DEFAULT 'stamp',  -- stamp | signature | stamp_signature (ختم مدموج مع توقيع بصورة وحدة)
-    linked_examining_doctor_id INTEGER,  -- ربط اختياري بدكتور من examining_doctors_list
-    image_filename TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'stamp',  -- stamp | signature | stamp_signature (وصف فقط، لا يتحكم بالعرض)
+    linked_examining_doctor_id INTEGER,  -- ربط اختياري بدكتور من examining_doctors_list — يُلصق تلقائيًا
+                                          -- بأي تقرير يظهر فيه هذا الدكتور كـ"دكتور فاحص" للزيارة (visits.examining_doctor)
+    image_filename TEXT NOT NULL,        -- صورة الختم (الطبقة السفلى)
+    signature_filename TEXT,             -- صورة التوقيع (الطبقة العلوية، ملاصقة لصورة الختم بدون فراغ) — اختياري
+    is_lab_default INTEGER DEFAULT 0,    -- ختم المختبر الافتراضي: يُلصق تلقائيًا حتى بدون دكتور فاحص مرتبط
     default_width INTEGER DEFAULT 140,
     sort_order INTEGER DEFAULT 0,
     is_active INTEGER DEFAULT 1,
@@ -552,6 +555,18 @@ def migrate(conn):
             ("full_name_en", "TEXT"),
         ],
         "doctors": [("email", "TEXT"), ("commission_percent", "REAL DEFAULT 0")],
+        "digital_stamps": [
+            # signature_filename: صورة توقيع منفصلة تُلصق فوق صورة الختم
+            # (image_filename) مباشرة — فوقه بدون أي فراغ بينهما (touching) —
+            # كوحدة واحدة تُسحب وتُحرَّك سوا دائمًا (مو ختمين منفصلين). لو
+            # فاضي، يبقى السلوك القديم: صورة وحدة فقط (image_filename).
+            ("signature_filename", "TEXT"),
+            # is_lab_default: علامة "هذا هو ختم المختبر الافتراضي" — يُلصق
+            # تلقائيًا بأي تقرير مفعّل له صندوق الختم (enable_stamp_widget)
+            # حتى لو ما فيه دكتور فاحص مرتبط أصلاً. يُسمح بختم مختبري وحد فقط
+            # فعليًا (يُفعَّل بمصمم الأختام؛ تفعيل ختم جديد يلغي القديم تلقائيًا).
+            ("is_lab_default", "INTEGER DEFAULT 0"),
+        ],
         # phone: رقم واتساب مدير المختبر المُرسِل (لإرسال كشف الحساب الشهري له)
         "referral_centers": [("phone", "TEXT")],
         "order_tests": [
@@ -614,6 +629,26 @@ def migrate(conn):
             # لا يتأثر إطلاقًا بهذا الحقل -- يبقى يُطبع بقالب مختبرك (نفس
             # الشعار والدكاترة) بغض النظر عن مكان الإرسال الفعلي.
             ("forwarded_lab_name", "TEXT"), ("forwarded_cost", "REAL DEFAULT 0"),
+            # sent_to_reception / sent_to_reception_at: علامة "أُرسلت لشاشة
+            # الاستقبال" -- تُبدَّل من زر 📤 بصفحة Orders (شاشة المختبر) بعد ما
+            # تكتمل نتيجة هذا التحليل (Completed/Verified). بمجرد ما تُرسَل،
+            # يختفي هذا التحليل من القائمة الافتراضية بصفحة Orders (يبقى
+            # موجود فعليًا بقاعدة البيانات ويظهر لو استخدم أي موظف مربع
+            # البحث)، ويظهر بصفحة النتائج بشاشة الاستقبال جاهزًا للطباعة
+            # والتسليم للمريض. راجع send_order_test_to_reception بـapp.py.
+            ("sent_to_reception", "INTEGER DEFAULT 0"), ("sent_to_reception_at", "TEXT"),
+            # reception_seen: هل موظف الاستقبال "شاف" هذا الإرسال أصلاً
+            # (يصير 0 عند الإرسال، ويرجع 1 بعد ما يظهر إشعار/رنة الجرس له
+            # مرة وحدة). يتحكم بعداد الإشعارات غير المقروءة بشريط شاشة
+            # الاستقبال. الافتراضي 1 لأي صف قديم قبل هذي الميزة (ما يطلع
+            # إشعار وهمي عن نتائج قديمة أصلاً).
+            ("reception_seen", "INTEGER DEFAULT 1"),
+            # printed_at: أول لحظة انفتحت فيها صفحة طباعة هذا التحليل فعليًا
+            # (طباعة مفردة أو ضمن حزمة نتائج الزيارة المجمّعة) -- تُستخدم مع
+            # ot.status لمنع أي تعديل لاحق على النتيجة أو معلومات المريض
+            # إلا بدخول يوزر/باسورد حساب مسؤول أو مشرف حقيقي (راجع
+            # _check_completed_result_gate بـapp.py). NULL = لسا ما انطبعت.
+            ("printed_at", "TEXT"),
         ],
         "invoices": [("is_locked", "INTEGER DEFAULT 0"), ("extra_charges", "REAL DEFAULT 0")],
         "visits": [("examining_doctor", "TEXT"), ("expenses", "REAL DEFAULT 0"),
@@ -2002,27 +2037,64 @@ def get_digital_stamp(db, stamp_id):
 
 
 def add_digital_stamp(db, label, kind, image_filename, linked_examining_doctor_id=None,
-                       default_width=140, created_by=None):
+                       default_width=140, created_by=None, signature_filename=None, is_lab_default=False):
     max_order = db.execute("SELECT COALESCE(MAX(sort_order), -1) as m FROM digital_stamps").fetchone()["m"]
     now = datetime.now().isoformat(timespec="seconds")
+    if is_lab_default:
+        # ختم مختبر افتراضي وحد بس بأي وقت — تفعيل هذا يلغي أي ختم مختبر
+        # افتراضي قديم تلقائيًا (بدون ما يحذفه، فقط يوقف تلقائيته).
+        db.execute("UPDATE digital_stamps SET is_lab_default=0 WHERE is_lab_default=1")
     cur = db.execute(
         "INSERT INTO digital_stamps (label, kind, linked_examining_doctor_id, image_filename, "
-        "default_width, sort_order, is_active, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
-        (label, kind, linked_examining_doctor_id or None, image_filename, default_width,
-         max_order + 1, created_by, now),
+        "signature_filename, is_lab_default, default_width, sort_order, is_active, created_by, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+        (label, kind, linked_examining_doctor_id or None, image_filename, signature_filename,
+         1 if is_lab_default else 0, default_width, max_order + 1, created_by, now),
     )
     db.commit()
     return cur.lastrowid
 
 
-def update_digital_stamp(db, stamp_id, label, kind, linked_examining_doctor_id=None, is_active=True):
-    """تعديل بيانات ختم موجود بدون تغيير صورته (تغيير الصورة نفسها يكون
-    بحذف الختم وإضافته من جديد، تفاديًا لتعقيد استبدال الملف على القرص)."""
+def update_digital_stamp(db, stamp_id, label, kind, linked_examining_doctor_id=None, is_active=True,
+                          is_lab_default=False):
+    """تعديل بيانات ختم موجود بدون تغيير صوره (تغيير الصور نفسها يكون
+    بحذف الختم وإضافته من جديد، تفاديًا لتعقيد استبدال الملفات على القرص)."""
+    if is_lab_default:
+        db.execute("UPDATE digital_stamps SET is_lab_default=0 WHERE is_lab_default=1 AND id!=?", (stamp_id,))
     db.execute(
-        "UPDATE digital_stamps SET label=?, kind=?, linked_examining_doctor_id=?, is_active=? WHERE id=?",
-        (label, kind, linked_examining_doctor_id or None, 1 if is_active else 0, stamp_id),
+        "UPDATE digital_stamps SET label=?, kind=?, linked_examining_doctor_id=?, is_active=?, is_lab_default=? WHERE id=?",
+        (label, kind, linked_examining_doctor_id or None, 1 if is_active else 0,
+         1 if is_lab_default else 0, stamp_id),
     )
     db.commit()
+
+
+def find_stamps_for_report(db, examining_doctor_name):
+    """يرجّع قائمة الأختام اللي يُفترض تُلصق تلقائيًا فوق تقرير معيّن —
+    بدون أي تدخّل يدوي — بناءً على:
+      1) الختم المرتبط باسم "الدكتور الفاحص" المُختار لهذي الزيارة تحديدًا
+         (visits.examining_doctor، مطابقة بالاسم مع examining_doctors_list)
+      2) + ختم المختبر الافتراضي (is_lab_default) إن وُجد — يُضاف دائمًا
+         بغض النظر عن وجود دكتور فاحص من عدمه.
+    تُستدعى فقط لو ما فيه أي إلصاق يدوي محفوظ مسبقًا لهذا التقرير بالذات
+    (راجع get_stamp_placements بـapp.py قبل استدعاء هذي) — حتى لا تتجاوز
+    أي تحريك يدوي سواه المستخدم بنفسه."""
+    results = []
+    if examining_doctor_name:
+        doctor_row = db.execute(
+            "SELECT id FROM examining_doctors_list WHERE name=?", (examining_doctor_name,)
+        ).fetchone()
+        if doctor_row:
+            results.extend(db.execute(
+                "SELECT * FROM digital_stamps WHERE linked_examining_doctor_id=? AND is_active=1",
+                (doctor_row["id"],),
+            ).fetchall())
+    lab_stamp = db.execute(
+        "SELECT * FROM digital_stamps WHERE is_lab_default=1 AND is_active=1 LIMIT 1"
+    ).fetchone()
+    if lab_stamp:
+        results.append(lab_stamp)
+    return results
 
 
 def delete_digital_stamp(db, stamp_id):
@@ -2038,7 +2110,7 @@ def get_stamp_placements(db, target_type, target_id):
     """كل الأختام/التواقيع الملصوقة حاليًا فوق تقرير معيّن (زيارة أو تحليل
     مفرد)، بمواضعها بالضبط — تُستخدم لرسمها فوق معاينة/طباعة التقرير."""
     return db.execute(
-        "SELECT rsp.*, ds.image_filename, ds.label, ds.kind, ds.default_width "
+        "SELECT rsp.*, ds.image_filename, ds.signature_filename, ds.label, ds.kind, ds.default_width "
         "FROM report_stamp_placements rsp JOIN digital_stamps ds ON ds.id = rsp.stamp_id "
         "WHERE rsp.target_type=? AND rsp.target_id=? ORDER BY rsp.id",
         (target_type, target_id),

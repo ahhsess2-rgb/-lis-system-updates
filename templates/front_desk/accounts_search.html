@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block page_title %}بحث وتصدير الحسابات{% endblock %}
+{% block content %}
+{#
+  front_desk/accounts_search.html
+  =============================================================================
+  شاشة واحدة بوضعين (kind=basic / kind=doctor) — الفورم يُرسَل GET حتى
+  يصير رابط النتائج نفسه قابل للمشاركة/الرجوع له، ونفس المعاملات هذي
+  بالضبط تُستخدم بروابط التصدير (xlsx/pdf) — راجع _accounts_search_run
+  بـapp.py.
+#}
+<style>
+  .report-table { width: 100%; border-collapse: collapse; }
+  .report-table th, .report-table td { border: 1px solid #E2E8F0; padding: 8px 10px; text-align: right; font-size: 13px; }
+  .report-table th { background: #205072; color: #fff; }
+  .report-table tfoot td { font-weight: 700; background: #F3F6F8; }
+  .report-toolbar { margin-bottom: 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .report-toolbar a.pill { text-decoration:none; background:#F3F6F8; color:#205072; padding:6px 12px; border-radius:6px; font-size:12px; border:1px solid #E2E8F0; }
+  .report-toolbar a.pill.active { background:#205072; color:#fff; }
+  .report-heading { font-size: 18px; color: #205072; margin-bottom: 2px; }
+  .report-sub { color: #64748B; font-size: 13px; margin-bottom: 16px; }
+  .search-box { background:#F8FAFC; border:1px solid #E2E8F0; border-radius:8px; padding:14px 16px; margin-bottom:18px; }
+  .search-field { margin-bottom:12px; }
+  .search-field label { display:block; font-weight:700; font-size:12.5px; margin-bottom:4px; }
+  .test-list {
+    max-height:160px; overflow-y:auto; border:1px solid #E2E8F0; border-radius:6px; padding:8px;
+    display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:4px; background:#fff;
+  }
+  .test-list label { display:flex; align-items:center; gap:4px; font-size:0.88em; font-weight:400; }
+  .waived-row { opacity:0.55; }
+  @media print { .report-toolbar, .search-box, .export-bar { display:none; } }
+</style>
+
+<div class="report-toolbar">
+  <a class="pill {{ '' if kind == 'doctor' else 'active' }}" href="{{ url_for('accounts_search', kind='basic') }}">🔍 بحث عام (تحاليل / مرضى)</a>
+  <a class="pill {{ 'active' if kind == 'doctor' else '' }}" href="{{ url_for('accounts_search', kind='doctor') }}">🩺 بحث الطبيب الفاحص</a>
+  <a class="pill" href="{{ url_for('daily_report') }}">🗓️ اليومي</a>
+  <a class="pill" href="{{ url_for('monthly_report') }}">📅 الشهري</a>
+  <a class="pill" href="{{ url_for('quarter_report') }}">📈 الربع سنوي</a>
+  <a class="pill" href="{{ url_for('half_year_report') }}">📆 النصف سنوي</a>
+  <a class="pill" href="{{ url_for('annual_report') }}">📊 السنوي</a>
+  <a class="pill" href="{{ url_for('dashboard') }}" style="margin-inline-start:auto;">🔙 الرجوع للرئيسية</a>
+</div>
+
+<div class="report-heading">{{ brand_name }} — بحث وتصدير الحسابات</div>
+
+<div class="search-box">
+  <form method="GET">
+    <input type="hidden" name="kind" value="{{ kind }}">
+
+    <div class="search-field">
+      <label>الفترة</label>
+      <div style="display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
+        <label style="font-weight:400; display:flex; align-items:center; gap:4px;">
+          <input type="radio" name="date_mode" value="single" onchange="acsToggleDateMode()"
+                 {{ 'checked' if request_args.get('date_mode', 'single') == 'single' }}>
+          تاريخ واحد
+        </label>
+        <input type="date" name="date" id="acsDateSingle" value="{{ request_args.get('date', '') }}">
+        <label style="font-weight:400; display:flex; align-items:center; gap:4px;">
+          <input type="radio" name="date_mode" value="range" onchange="acsToggleDateMode()"
+                 {{ 'checked' if request_args.get('date_mode') == 'range' }}>
+          فترة من/إلى
+        </label>
+        <input type="date" name="date_from" id="acsDateFrom" value="{{ request_args.get('date_from', '') }}">
+        <span>—</span>
+        <input type="date" name="date_to" id="acsDateTo" value="{{ request_args.get('date_to', '') }}">
+      </div>
+    </div>
+
+    {% if kind == 'doctor' %}
+    <div class="search-field">
+      <label>الطبيب الفاحص</label>
+      <select name="doctor_name" required style="min-width:260px; padding:5px 8px;">
+        <option value="">-- اختر --</option>
+        {% for name in doctor_choices %}
+        <option value="{{ name }}" {{ 'selected' if request_args.get('doctor_name') == name }}>{{ name }}</option>
+        {% endfor %}
+      </select>
+      <p class="report-sub" style="margin:6px 0 0;">اترك "التحاليل" أدناه بدون تحديد ليظهر كل تحليل لهذا الطبيب أجر مسجَّل له تلقائيًا.</p>
+    </div>
+    {% endif %}
+
+    <div class="search-field">
+      <label>التحاليل {{ '(اختياري بوضع الطبيب الفاحص)' if kind == 'doctor' else '(بدون تحديد = كل التحاليل)' }}</label>
+      <div class="test-list">
+        {% for tid, tname in test_choices %}
+        <label>
+          <input type="checkbox" name="test_id" value="{{ tid }}" {{ 'checked' if tid in selected_test_ids }}>
+          {{ tname }}
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    {% if kind == 'basic' %}
+    <div class="search-field">
+      <label>عرض النتائج</label>
+      <div style="display:flex; gap:14px;">
+        <label style="font-weight:400; display:flex; align-items:center; gap:4px;">
+          <input type="radio" name="result_mode" value="counts"
+                 {{ 'checked' if request_args.get('result_mode', 'counts') == 'counts' }}> بالأعداد فقط
+        </label>
+        <label style="font-weight:400; display:flex; align-items:center; gap:4px;">
+          <input type="radio" name="result_mode" value="names"
+                 {{ 'checked' if request_args.get('result_mode') == 'names' }}> بالأعداد مع أسماء المرضى
+        </label>
+      </div>
+    </div>
+    {% endif %}
+
+    <button class="btn" type="submit">بحث</button>
+  </form>
+</div>
+
+<script>
+  function acsToggleDateMode() {
+    var single = document.querySelector('input[name="date_mode"][value="single"]').checked;
+    document.getElementById('acsDateSingle').disabled = !single;
+    document.getElementById('acsDateFrom').disabled = single;
+    document.getElementById('acsDateTo').disabled = single;
+  }
+  document.addEventListener('DOMContentLoaded', acsToggleDateMode);
+</script>
+
+{% if has_query and result %}
+  <div class="report-sub" style="font-size:14px; font-weight:700; color:#205072;">
+    النتائج ({{ date_from|ddmmyyyy }} — {{ date_to|ddmmyyyy }})
+  </div>
+
+  <div class="export-bar" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px;">
+    {% macro export_form(action, extra_label, detail) %}
+    <form method="GET" action="{{ action }}" style="display:inline;">
+      {% for k, v in request_args.items(true) %}{% if k != 'detail' %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endif %}{% endfor %}
+      {% if detail %}<input type="hidden" name="detail" value="{{ detail }}">{% endif %}
+      <button class="btn small secondary" type="submit">{{ extra_label }}</button>
+    </form>
+    {% endmacro %}
+
+    {% if kind == 'doctor' %}
+      {{ export_form(url_for('accounts_search_export_xlsx'), '📥 Excel تفصيلي', 'full') }}
+      {{ export_form(url_for('accounts_search_export_xlsx'), '📥 Excel مختصر', 'short') }}
+      {{ export_form(url_for('accounts_search_export_pdf'), '🖨 PDF تفصيلي', 'full') }}
+      {{ export_form(url_for('accounts_search_export_pdf'), '🖨 PDF مختصر', 'short') }}
+    {% elif result.mode == 'names' %}
+      {{ export_form(url_for('accounts_search_export_xlsx'), '📥 Excel (تفاصيل كاملة)', 'full') }}
+      {{ export_form(url_for('accounts_search_export_xlsx'), '📥 Excel (مختصر)', 'short') }}
+      {{ export_form(url_for('accounts_search_export_pdf'), '🖨 PDF', 'full') }}
+    {% else %}
+      {{ export_form(url_for('accounts_search_export_xlsx'), '📥 تصدير Excel', none) }}
+      {{ export_form(url_for('accounts_search_export_pdf'), '🖨 تصدير PDF', none) }}
+    {% endif %}
+  </div>
+
+  {% if kind == 'doctor' %}
+    {% if not result.doctor_name %}
+    <p class="report-sub">اختر طبيبًا فاحصًا أعلاه.</p>
+    {% else %}
+    <div class="report-heading" style="font-size:15px;">عدد كل تحليل لكل شهر</div>
+    <table class="report-table" style="margin-bottom:20px;">
+      <thead><tr><th>التحليل</th><th>الشهر</th><th>العدد</th></tr></thead>
+      <tbody>
+        {% for r in result.by_test_month %}
+        <tr><td>{{ r.test_name }}</td><td>{{ r.month|iraqi_month }}</td><td>{{ r.count }}</td></tr>
+        {% else %}
+        <tr><td colspan="3">لا نتائج لهذه الفترة.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="report-heading" style="font-size:15px;">إجمالي كل تحليل بكامل الفترة</div>
+    <table class="report-table" style="margin-bottom:20px;">
+      <thead><tr><th>التحليل</th><th>العدد</th><th>أجر التحليل الواحد</th><th>المجموع</th></tr></thead>
+      <tbody>
+        {% for r in result.by_test_total %}
+        <tr><td>{{ r.test_name }}</td><td>{{ r.count }}</td><td>{{ '%.0f'|format(r.rate) }}</td><td>{{ '%.0f'|format(r.subtotal) }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="report-heading" style="font-size:15px;">تفصيل كل مريض</div>
+    <table class="report-table">
+      <thead><tr><th>المريض</th><th>التحليل</th><th>التاريخ</th><th>الأجر</th></tr></thead>
+      <tbody>
+        {% for r in result.patient_rows %}
+        <tr class="{{ 'waived-row' if r.fee_waived }}">
+          <td>{{ r.patient_name }}</td><td>{{ r.test_name }}</td><td>{{ r.date|ddmmyyyy }}</td>
+          <td>{{ '%.0f'|format(r.rate) if not r.fee_waived else 'مجاني' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4">لا نتائج لهذه الفترة.</td></tr>
+        {% endfor %}
+      </tbody>
+      <tfoot><tr><td colspan="3">المجموع الكلي</td><td>{{ '%.0f'|format(result.total) }}</td></tr></tfoot>
+    </table>
+
+    <p style="font-weight:700; margin-top:14px; color:#205072;">
+      المجموع الكلي للفترة من {{ date_from|ddmmyyyy }} إلى {{ date_to|ddmmyyyy }} للدكتور {{ result.doctor_name }}
+      = {{ '%.0f'|format(result.total) }}
+    </p>
+    {% endif %}
+
+  {% elif result.mode == 'counts' %}
+    <table class="report-table">
+      <thead><tr><th>التحليل</th><th>التاريخ</th><th>العدد</th></tr></thead>
+      <tbody>
+        {% for r in result.rows %}
+        <tr><td>{{ r.test_name }}</td><td>{{ r.date|ddmmyyyy }}</td><td>{{ r.count }}</td></tr>
+        {% else %}
+        <tr><td colspan="3">لا نتائج.</td></tr>
+        {% endfor %}
+      </tbody>
+      <tfoot><tr><td colspan="2">المجموع الكلي</td><td>{{ result.total_count }}</td></tr></tfoot>
+    </table>
+
+  {% else %}
+    <table class="report-table">
+      <thead><tr><th>المريض</th><th>العمر</th><th>الجنس</th><th>رقم التسجيل</th><th>التحليل</th><th>التاريخ</th><th>السعر</th></tr></thead>
+      <tbody>
+        {% for r in result.rows %}
+        <tr class="{{ 'waived-row' if r.fee_waived }}">
+          <td>{{ r.patient_name }}</td><td>{{ r.age }} {{ r.age_unit }}</td><td>{{ r.gender }}</td>
+          <td>{{ r.reg_no }}</td><td>{{ r.test_name }}</td><td>{{ r.date|ddmmyyyy }}</td>
+          <td>{{ '%.0f'|format(r.price) if not r.fee_waived else 'مجاني' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7">لا نتائج.</td></tr>
+        {% endfor %}
+      </tbody>
+      <tfoot><tr><td colspan="6">المجموع الكلي</td><td>{{ '%.0f'|format(result.total_price) }}</td></tr></tfoot>
+    </table>
+  {% endif %}
+{% elif has_query %}
+  <p class="report-sub">أكمل معايير البحث (مثلاً اسم الطبيب الفاحص) واضغط "بحث".</p>
+{% endif %}
+{% endblock %}

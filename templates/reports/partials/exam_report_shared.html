@@ -34,18 +34,39 @@
   .report-page { direction: ltr; text-align: left; font-family: var(--exam-font-en); }
 
   /* ============== ترويسة بيانات المريض/العينة (patient_meta_v2) ============== */
+  {% set _col_gap = (patient_info_col_gap|default(36))|int %}
+  {% set _row_gap = (patient_info_row_gap|default(3))|int %}
   .patient-info-v2 {
-    display: flex; justify-content: space-between; gap: {{ patient_info_col_gap|default(36) }}px;
+    /* المسافة يمين/يسار بين العمودين: margin-inline-end على العمود الأول
+       بدل flex "gap" — لأن معيار CSS يرفض قيمة سالبة لـgap فتُتجاهل كاملة
+       (والإعدادات تسمح بقيمة سالبة، راجع settings.html)، بينما margin
+       يقبلها بلا مشاكل (يقرّب العمودين أكثر من الحد الافتراضي صفر). */
+    display: flex; justify-content: space-between;
     margin: {{ patient_info_top_gap|default(4) }}px 0 14px 0; direction: ltr;
     font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 13.5px;
   }
   .info-col { flex: 1; }
-  .info-row { display: grid; grid-template-columns: {{ patient_info_label_width|default(108) }}px 12px 1fr; padding: {{ patient_info_row_gap|default(3) }}px 0; align-items: baseline; }
+  .info-col:first-child { margin-inline-end: {{ _col_gap }}px; }
+  /* المسافة بين أسطر كل عمود: نفس سلوك padding القديم بالضبط للقيم >= 0
+     (حتى ما تنكسر أي إعدادات محفوظة سابقًا)، وmargin-top سالب فقط للقيم
+     السالبة الجديدة — padding لا يقبل قيمة سالبة، وmargin-top مفرد
+     (بدون margin-bottom) يقرّب السطر من السطر اللي قبله مباشرة بدون
+     تعقيد "انهيار الهوامش" بين عناصر متتالية. */
+  .info-row {
+    display: grid; grid-template-columns: {{ patient_info_label_width|default(108) }}px 12px 1fr;
+    padding: {{ _row_gap if _row_gap > 0 else 0 }}px 0;
+    margin-top: {{ _row_gap if _row_gap < 0 else 0 }}px;
+    align-items: baseline;
+  }
   .info-label { font-weight: 700; color: #111; }
   .info-colon { color: #111; }
   .info-val { color: #1E3A8A; font-weight: 600; }
   .info-val.ar-name {
-    color: #7A1F1F; direction: rtl; unicode-bidi: isolate; text-align: right;
+    /* المطلوب 6: كانت text-align:right تدفع القيمة لأقصى يمين خلية الـ1fr
+       (بعيدة عن ":" وPatient Name)؛ صارت left فتظهر مباشرة بجانب الكلمة
+       تمامًا مثل صف الاسم الإنكليزي تحتها. direction:rtl باقية كما هي
+       فقط لرسم الحروف العربية نفسها صحيح (اتجاه الكتابة الداخلي). */
+    color: #7A1F1F; direction: rtl; unicode-bidi: isolate; text-align: left;
     font-family: var(--exam-font-ar);
   }
   /* اسم المريض بالعربي: سطر مستقل بالوسط فوق صندوق معلومات المريض، مو
@@ -84,6 +105,17 @@
   }
   .report-page.exam-editing .exam-section { outline: 1px dashed transparent; border-radius: 4px; }
   .report-page.exam-editing .exam-section:hover { outline-color: #AEBBCB; cursor: grab; }
+
+  /* ============== ثلاث أعمدة ثابتة داخل قسم واحد (المطلوب 1) ==============
+     تظهر فقط لو باراميتر واحد على الأقل بهذا القسم اختير له "يسار" أو
+     "يمين" صراحة من نافذة 🎨 — وإلا يبقى عمود واحد بعرض الصفحة كاملة كما
+     كان دائماً (صفر أثر على أي تصميم قديم لم يُخصَّص). نفس فكرة
+     custom_v2.html بالضبط لكن على مستوى القسم الواحد بدل التقرير كامل،
+     حتى يبقى عنوان كل قسم مفصولاً وواضحاً فوق أعمدته الثلاث. */
+  .exam-columns { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 20px; align-items: start; }
+  .exam-column { min-width: 0; }
+  .exam-column .result-row { grid-template-columns: 14px 1fr 12px 1fr auto; font-size: 0.9em; }
+  @media print { .exam-columns { break-inside: avoid; } .exam-column { break-inside: avoid; } }
 
   /* ============== صف نتيجة مفردة ============== */
   .result-row {
@@ -384,6 +416,7 @@
      {% if style.get('font_size') %}data-font-size="{{ style.get('font_size') }}"{% endif %}
      {% if style.get('label') %}data-label="{{ style.get('label') }}"{% endif %}
      {% if style.get('align') %}data-align="{{ style.get('align') }}"{% endif %}
+     {% if style.get('column') %}data-column="{{ style.get('column') }}"{% endif %}
      {% if style.get('font_size') %}style="font-size:{{ style.get('font_size') }}px;"{% endif %}>
   <span class="row-drag-handle" title="اسحب لتغيير ترتيب هذا الصف">⋮⋮</span>
   <span class="rname">{{ display_name }}</span>
@@ -405,6 +438,40 @@
   </span>
 </div>
 <div class="inline-note" id="exam-note-{{ param['id'] }}" style="{{ '' if note else 'display:none;' }}">{% if note %}💬 {{ note }}{% endif %}</div>
+{% endmacro %}
+
+
+{#
+  render_section_rows: يرسم صفوف قسم واحد (names) — إما عمود واحد بعرض
+  الصفحة كاملة كما كان دائماً (لو ما فيه أي باراميتر بهذا القسم اختار له
+  المستخدم "يسار" أو "يمين" صراحة من نافذة 🎨)، أو ثلاث أعمدة ثابتة (يسار/
+  وسط/يمين) بمجرد ما أي باراميتر واحد بهذا القسم يُضبط له موضع غير الوسط —
+  بنفس منطق custom_v2.html بالضبط (المطلوب 1)، بحيث القسم نفسه (عنوانه)
+  يبقى مفصولاً وواضحاً عن باقي الأقسام، والأعمدة الثلاث داخل حدود هذا
+  القسم فقط.
+#}
+{% macro render_section_rows(names, params_by_name, ranges, units, results_by_name, param_notes, order_test_id, hidden, param_overrides) %}
+{% set has_custom_column = false %}
+{% for name in names %}{% if param_overrides.get(name, {}).get('column') in ('left', 'right') %}{% set has_custom_column = true %}{% endif %}{% endfor %}
+{% if not has_custom_column %}
+  {% for name in names %}
+    {% if name in params_by_name %}
+      {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name)), param_notes.get(name, ''), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
+    {% endif %}
+  {% endfor %}
+{% else %}
+  <div class="exam-columns">
+    {% for col in ['left', 'center', 'right'] %}
+    <div class="exam-column">
+      {% for name in names %}
+        {% if name in params_by_name and (param_overrides.get(name, {}).get('column') or 'center') == col %}
+          {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name)), param_notes.get(name, ''), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
+        {% endif %}
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+{% endif %}
 {% endmacro %}
 
 
@@ -459,12 +526,8 @@
         <span class="section-title-text" data-editable="section_title">{{ title }}</span>
         <span class="title-edit-btn" onclick="examEditInline(this.previousElementSibling)" title="تعديل عنوان القسم">✏️</span>
       </div>
-      {% for name in names %}
-        {% if name in params_by_name %}
-          {% set _ = shown.append(name) %}
-          {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name)), param_notes.get(name, ''), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
-        {% endif %}
-      {% endfor %}
+      {% for name in names %}{% if name in params_by_name %}{% set _ = shown.append(name) %}{% endif %}{% endfor %}
+      {{ render_section_rows(names, params_by_name, ranges, units, results_by_name, param_notes, order_test_id, hidden, param_overrides) }}
       {{ add_param_row(key, order_test_id, test_definition_id) }}
     </div>
   {% endfor %}
@@ -480,9 +543,7 @@
         <span class="section-title-text" data-editable="section_title">{{ section_labels.get('_leftover') or 'Other Results' }}</span>
         <span class="title-edit-btn" onclick="examEditInline(this.previousElementSibling)" title="تعديل عنوان القسم">✏️</span>
       </div>
-      {% for name in leftover_names %}
-        {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name)), param_notes.get(name, ''), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
-      {% endfor %}
+      {{ render_section_rows(leftover_names, params_by_name, ranges, units, results_by_name, param_notes, order_test_id, hidden, param_overrides) }}
       {{ add_param_row('_leftover', order_test_id, test_definition_id) }}
     </div>
   {% endif %}
@@ -560,6 +621,13 @@
       <option value="near_name">قريب من الاسم</option>
       <option value="center">بالوسط</option>
       <option value="near_unit">قريب من الوحدة</option>
+    </select>
+  </label>
+  <label>الموضع بعرض التقرير
+    <select id="examStyleColumn">
+      <option value="center">وسط (افتراضي)</option>
+      <option value="left">يسار</option>
+      <option value="right">يمين</option>
     </select>
   </label>
   <div class="exam-style-actions">
@@ -1009,6 +1077,7 @@ function examOpenStylePopover(event, btn) {
   document.getElementById('examStyleColor').value = row.dataset.color || '#1f3b7a';
   document.getElementById('examStyleSize').value = row.dataset.fontSize || '';
   document.getElementById('examStyleAlign').value = row.dataset.align || '';
+  document.getElementById('examStyleColumn').value = row.dataset.column || 'center';
   var rect = btn.getBoundingClientRect();
   pop.style.top = (window.scrollY + rect.bottom + 4) + 'px';
   pop.style.left = (window.scrollX + rect.left - 150) + 'px';
@@ -1025,6 +1094,7 @@ function examApplyStyle() {
   var color = document.getElementById('examStyleColor').value;
   var size = document.getElementById('examStyleSize').value;
   var align = document.getElementById('examStyleAlign').value;
+  var column = document.getElementById('examStyleColumn').value;
   var nameEl = row.querySelector('.rname');
   var valEl = row.querySelector('.rval-num') || row.querySelector('.rval');
   var valBoxEl = row.querySelector('.rval');
@@ -1033,6 +1103,12 @@ function examApplyStyle() {
   if (size) { row.style.fontSize = size + 'px'; row.dataset.fontSize = size; }
   if (align) { valBoxEl.style.textAlign = align === 'near_name' ? 'left' : (align === 'center' ? 'center' : 'right'); row.dataset.align = align; }
   else { valBoxEl.style.textAlign = ''; delete row.dataset.align; }
+  // الموضع بعرض التقرير (يسار/وسط/يمين، المطلوب 1): يُسجَّل فقط بـdata-*
+  // هنا — إعادة الترتيب الفعلي لثلاث أعمدة تصير بالسيرفر بعد الحفظ (الصفحة
+  // تُعاد تحميلها تلقائياً بعد أي حفظ ناجح، راجع examConfirmSave) بنفس
+  // منطق custom_v2.html بالضبط.
+  if (column && column !== 'center') { row.dataset.column = column; }
+  else { delete row.dataset.column; }
   examCloseStylePopover();
 }
 function examClearStyle() {
@@ -1045,7 +1121,7 @@ function examClearStyle() {
   valEl.style.color = '';
   valBoxEl.style.textAlign = '';
   row.style.fontSize = '';
-  delete row.dataset.label; delete row.dataset.color; delete row.dataset.fontSize; delete row.dataset.align;
+  delete row.dataset.label; delete row.dataset.color; delete row.dataset.fontSize; delete row.dataset.align; delete row.dataset.column;
   examCloseStylePopover();
 }
 
@@ -1074,6 +1150,21 @@ function examSetFont(kind, value) {
 function examSaveLayout() {
   document.getElementById('examScopeModal').style.display = 'flex';
 }
+
+// ---- إخفاء/إظهار كامل منطقة الختم والتوقيع (الصندوق + أي صورة ختم/توقيع
+// مُلصقة فيها) بضغطة وحدة — يُخفى بصريًا فورًا، ثم يفتح نافذة اختيار النطاق
+// المعتادة (هذا المريض فقط / كل مرضى هذا التحليل) ليُحفظ القرار بنفس آلية
+// حفظ أي تعديل تصميم آخر (examConfirmSave → report_layout.hide_signature).
+function examToggleSignature() {
+  var wrap = document.querySelector('.signature-area-wrap');
+  if (!wrap) return;
+  var willHide = wrap.dataset.hidden !== '1';
+  wrap.dataset.hidden = willHide ? '1' : '0';
+  wrap.style.display = willHide ? 'none' : '';
+  var btn = document.getElementById('examSignatureToggleBtn');
+  if (btn) btn.textContent = willHide ? '👁️ إظهار منطقة التوقيع والختم' : '🙈 إخفاء منطقة التوقيع والختم';
+  examSaveLayout();
+}
 function examSerializeLayout() {
   var container = examContainer();
   var sectionEls = Array.prototype.slice.call(container.querySelectorAll('.exam-section'));
@@ -1092,6 +1183,7 @@ function examSerializeLayout() {
       if (r.dataset.fontSize) ov.font_size = parseInt(r.dataset.fontSize, 10);
       if (r.dataset.label) ov.label = r.dataset.label;
       if (r.dataset.align) ov.align = r.dataset.align;
+      if (r.dataset.column) ov.column = r.dataset.column;
       if (Object.keys(ov).length) param_overrides[r.dataset.paramName] = ov;
     });
   });
@@ -1118,6 +1210,11 @@ function examSerializeLayout() {
                  param_overrides: param_overrides, section_labels: section_labels, page_offset_px: examPageOffset };
   if (fontAr) layout.font_family_ar = fontAr;
   if (fontEn) layout.font_family_en = fontEn;
+  // منطقة الختم والتوقيع: نحافظ على حالة الإخفاء الحالية عند أي حفظ آخر
+  // (تعديل لون/تسمية...الخ) حتى لا ترجع تظهر بالغلط، وتتحدّث فورًا لو هذا
+  // الحفظ بالذات جاي من زر إخفاء/إظهار التوقيع نفسه (examToggleSignature).
+  var sigWrap = document.querySelector('.signature-area-wrap');
+  if (sigWrap) layout.hide_signature = sigWrap.dataset.hidden === '1';
   var titleEl = document.querySelector('.report-title[data-editable="report_title"]');
   if (titleEl) layout.report_title = titleEl.textContent.trim();
   else if (reportTitleOverride) layout.report_title = reportTitleOverride;

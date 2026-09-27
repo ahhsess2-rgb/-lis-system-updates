@@ -27,12 +27,14 @@ from database import (get_db, init_db, hash_password, get_setting, set_setting,
                        find_reference_range,
                        save_saved_report, get_saved_report, search_saved_reports,
                        get_digital_stamps, get_digital_stamp, add_digital_stamp,
-                       update_digital_stamp, delete_digital_stamp,
+                       update_digital_stamp, delete_digital_stamp, find_stamps_for_report,
                        get_stamp_placements, upsert_stamp_placement, remove_stamp_placement,
                        get_report_layout, save_report_layout, reset_report_layout, get_raw_layout,
                        find_last_visit_by_name_age, get_visit_completed_tests,
                        save_visit_previous_merges, get_visit_previous_merges)
 from daily_counter import get_patient_number_of_day
+import accounts_search as acs
+import excel_export
 
 ARABIC_NAME_TRANSLITERATION_MAP = [
     ("عبدال", "Abdul"), ("عبد ال", "Abdul"), ("أبو", "Abu"), ("ابو", "Abu"),
@@ -226,14 +228,15 @@ os.makedirs(STAMPS_UPLOAD_DIR, exist_ok=True)
 ALLOWED_DASHBOARD_BG_EXT = {"png", "jpg", "jpeg", "webp"}
 
 
-def _save_stamp_image_on_white_bg(file_storage, stamp_id):
-    """يحفظ صورة الختم/التوقيع المرفوعة كملف PNG بخلفية بيضاء صلبة دائمًا —
+def _save_stamp_image_on_white_bg(file_storage, stamp_id, suffix=""):
+    """يحفظ صورة الختم أو التوقيع المرفوعة كملف PNG بخلفية بيضاء صلبة دائمًا —
     حتى لو الصورة الأصلية عندها خلفية شفافة (PNG) أو ملوّنة (خلفية زرقاء/
     رمادية من سكنر)، لأن ختم/توقيع بخلفية غير بيضاء يظهر "نشازًا" واضحًا
     فوق التقرير الأبيض. يفتح الصورة بمكتبة Pillow، يدمجها فوق طبقة بيضاء
-    (فتُصبح أي شفافية بيضاء تلقائيًا)، ثم يحفظها باسم ثابت stamp_<id>.png
-    داخل static/uploads/stamps. يرجّع اسم الملف النهائي فقط (بدون المسار
-    الكامل) ليُخزَّن بعمود digital_stamps.image_filename.
+    (فتُصبح أي شفافية بيضاء تلقائيًا)، ثم يحفظها باسم stamp_<id><suffix>.png
+    داخل static/uploads/stamps. suffix فاضي لصورة الختم نفسها، و"_sig" لصورة
+    التوقيع المنفصلة (لو الختم من نوع "ختم + توقيع" بصورتين). يرجّع اسم
+    الملف النهائي فقط (بدون المسار الكامل) ليُخزَّن بعمود digital_stamps.
 
     يتطلب: pip install Pillow (لو غير مثبّت أصلاً على جهاز السيرفر)."""
     from PIL import Image
@@ -243,9 +246,33 @@ def _save_stamp_image_on_white_bg(file_storage, stamp_id):
     white_bg.alpha_composite(img)
     flattened = white_bg.convert("RGB")
 
-    filename = f"stamp_{stamp_id}.png"
+    filename = f"stamp_{stamp_id}{suffix}.png"
     flattened.save(os.path.join(STAMPS_UPLOAD_DIR, filename), format="PNG")
     return filename
+
+
+def _serialize_stamp_placements(placements):
+    """يحوّل صفوف report_stamp_placements (sqlite3.Row، غير قابلة للتحويل
+    لـJSON مباشرة عبر فلتر tojson بالقالب) لقائمة قواميس عادية بنفس أسماء
+    الحقول اللي يتوقعها partials/stamp_picker.html (placement_id، image_url،
+    signature_url...). يقبل أيضًا القواميس الجاهزة (من الإلصاق التلقائي
+    بـ_print_report_impl) فيمررها كما هي بعد إكمال أي مفتاح ناقص فقط —
+    فالدالة idempotent وآمنة الاستدعاء مرتين على نفس القائمة."""
+    out = []
+    for p in placements:
+        keys = p.keys()
+        image_filename = p["image_filename"] if "image_filename" in keys else None
+        signature_filename = p["signature_filename"] if "signature_filename" in keys else None
+        out.append({
+            "placement_id": p["id"] if "id" in keys else None,
+            "stamp_id": p["stamp_id"],
+            "label": p["label"] if "label" in keys else "",
+            "pos_x": p["pos_x"], "pos_y": p["pos_y"],
+            "width": p["width"] or (p["default_width"] if "default_width" in keys else 140),
+            "image_url": url_for("static", filename=f"uploads/stamps/{image_filename}") if image_filename else None,
+            "signature_url": url_for("static", filename=f"uploads/stamps/{signature_filename}") if signature_filename else None,
+        })
+    return out
 
 ROLE_LABELS = {
     "admin": "Administrator",
@@ -702,6 +729,13 @@ IRAQI_MONTHS = {
 app.jinja_env.globals["IRAQI_MONTHS"] = IRAQI_MONTHS
 
 
+@app.template_filter("ddmmyyyy")
+def _ddmmyyyy_filter(value):
+    """'2026-09-12' -> '12/09/2026' — لعرض تواريخ ميزة البحث/التصدير
+    بصيغة DD/MM/YYYY كما طُلب."""
+    return acs.ddmmyyyy(value)
+
+
 @app.template_filter("iraqi_month")
 def iraqi_month_filter(value):
     """يحوّل شهرًا لاسمه العراقي. يقبل: رقم شهر مباشر (1-12)، أو نص تاريخ
@@ -856,11 +890,28 @@ def _check_completed_result_gate(db, form):
     السيرفر ما كان يتحقق منها فعليًا قبل هذا التعديل -- أي شخص يقدر يتجاوز
     الفحص بس بتعطيل الجافاسكربت أو بإرسال الطلب مباشرة. يرجع (ok, error).
     """
+    # نمط جديد (مفضّل): يوزر وباسورد حساب حقيقي بجدول users دوره admin أو
+    # supervisor -- كل شخص يفتح التعديل بحسابه الشخصي، فيُعرف بالضبط مين
+    # فتحه بدون الاعتماد على حقل اسم حر غير موثّق. لو الفورم بعث
+    # gate_username نمشي بهذا المسار حصرًا؛ غير هيك نرجع للنمط القديم
+    # (كلمة مرور مشتركة fee_waiver_gate_password_hash) حتى ما تنكسر أي
+    # شاشة قديمة لسا تستخدم الحقل القديم فقط (مثل تعديل معلومات المريض/
+    # الزيارة اللي ما تغيّرت هون).
+    entered_username = (form.get("gate_username") or "").strip()
+    entered_password = form.get("gate_password", "")
+    if entered_username:
+        user = db.execute(
+            "SELECT * FROM users WHERE username=? AND is_active=1", (entered_username,)
+        ).fetchone()
+        if not user or user["password_hash"] != hash_password(entered_password):
+            return False, "اسم المستخدم أو كلمة المرور غير صحيحة."
+        if user["role"] not in ("admin", "supervisor"):
+            return False, "هذا الحساب لا يملك صلاحية مسؤول/مشرف المختبر -- التعديل مرفوض."
+        return True, None
     stored_hash = get_setting(db, "fee_waiver_gate_password_hash", "")
     if not stored_hash:
         return False, "لم تُضبط كلمة مرور حماية تعديل النتائج المكتملة بعد -- اضبطها من صفحة الإعدادات أولاً."
-    entered = form.get("gate_password", "")
-    if hash_password(entered) != stored_hash:
+    if hash_password(entered_password) != stored_hash:
         return False, "كلمة مرور الحماية غير صحيحة -- التعديل مرفوض."
     return True, None
 
@@ -2354,6 +2405,44 @@ def api_dashboard_search():
     })
 
 
+# بحث سريع موحّد عن أي نتيجة تحليل (بالاسم/رقم التسجيل/الباركود) --
+# يظهر بمربع البحث العلوي المشترك بشريط كل صفحات البرنامج (topbar
+# بـbase.html)، فيكون متاحًا بنفس المكان وبنفس السرعة بالشاشات الثلاث
+# (استقبال/مختبر/الاثنين معًا) بدل المرور بصفحة Orders أو النتائج أول.
+# الرابط المُرجَع لكل نتيجة يتغيّر حسب واجهة المستخدم الحالية (session
+# interface) حتى ما يوصّل لصفحة محجوبة عنه (enforce_interface_scope).
+@app.route("/api/results/quick-search")
+@login_required
+def api_results_quick_search():
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify({"items": []})
+    db = get_db()
+    rows = db.execute(
+        "SELECT ot.id as order_test_id, ot.status, ot.barcode, td.name as test_name, "
+        "p.full_name as patient_name, v.id as visit_id, v.registration_number "
+        "FROM order_tests ot "
+        "JOIN test_definitions td ON td.id = ot.test_definition_id "
+        "JOIN orders o ON o.id = ot.order_id "
+        "JOIN visits v ON v.id = o.visit_id "
+        "JOIN patients p ON p.id = v.patient_id "
+        "WHERE p.full_name LIKE ? OR CAST(v.registration_number AS TEXT) LIKE ? OR ot.barcode LIKE ? "
+        "ORDER BY ot.id DESC LIMIT 20",
+        (f"%{q}%", f"%{q}%", f"%{q}%"),
+    ).fetchall()
+    use_front_desk = session.get("interface") in (None, "reception", "both")
+    items = []
+    for r in rows:
+        link = (url_for("visit_results_entry", visit_id=r["visit_id"]) if use_front_desk
+                else url_for("result_entry", order_test_id=r["order_test_id"]))
+        items.append({
+            "test_name": r["test_name"], "patient_name": r["patient_name"],
+            "registration_number": r["registration_number"], "status": r["status"],
+            "barcode": r["barcode"], "link": link,
+        })
+    return jsonify({"items": items})
+
+
 # بحث فوري (Live search) يُستخدم من شاشة "زيارة جديدة": بمجرد كتابة اسم
 # المريض يبحث عن أي مطابقة سابقة بجدول المرضى، حتى لا تنفتح بطاقة مريض
 # مكررة لشخص سبق أن راجع المختبر.
@@ -2509,11 +2598,17 @@ def results_list():
     # - "critical": زيارات فيها نتيجة واحدة على الأقل flag='Critical' ولسا
     #   verified_at فاضي — نفس معيار عدّاد "تنبيهات حرجة" بالرئيسية بالضبط.
     filter_type = request.args.get("filter", "")
+    # q: بحث حر باسم المريض / رقم التسجيل / الباركود -- يشتغل على كل
+    # الزيارات بدون استثناء (المُرسَلة للاستقبال وغيرها)، لأن أي موظف
+    # بأي شاشة لازم يقدر يوصل لأي نتيجة قديمة أو جديدة من هنا.
+    q = request.args.get("q", "").strip()
     query = (
         "SELECT v.id as visit_id, v.registration_number, v.created_at, p.full_name as patient_name, "
         "COUNT(ot.id) as tests_count, "
         "SUM(CASE WHEN ot.status IN ('Completed', 'Verified') THEN 1 ELSE 0 END) as done_count, "
         "SUM(CASE WHEN ot.status = 'Verified' THEN 1 ELSE 0 END) as verified_count, "
+        "SUM(CASE WHEN ot.sent_to_reception = 1 THEN 1 ELSE 0 END) as sent_count, "
+        "SUM(CASE WHEN ot.sent_to_reception = 1 AND ot.reception_seen = 0 THEN 1 ELSE 0 END) as unseen_count, "
         "GROUP_CONCAT(ot.id || ':' || td.name, '||') as tests_list "
         "FROM order_tests ot "
         "JOIN orders o ON o.id = ot.order_id "
@@ -2522,7 +2617,14 @@ def results_list():
         "JOIN test_definitions td ON td.id = ot.test_definition_id "
     )
     filter_label = None
-    if filter_type == "pending":
+    if q:
+        query += (
+            "WHERE (p.full_name LIKE ? OR CAST(v.registration_number AS TEXT) LIKE ? OR v.id IN ("
+            "  SELECT o2.visit_id FROM order_tests ot2 JOIN orders o2 ON o2.id = ot2.order_id "
+            "  WHERE ot2.barcode LIKE ?"
+            ")) "
+        )
+    elif filter_type == "pending":
         query += (
             "WHERE v.id IN ("
             "  SELECT o2.visit_id FROM order_tests ot2 "
@@ -2542,9 +2644,40 @@ def results_list():
         )
         filter_label = "زيارات فيها تنبيهات حرجة غير مُصادَق عليها"
     query += "GROUP BY v.id ORDER BY v.id DESC LIMIT 200"
-    rows = db.execute(query).fetchall()
+    q_params = [f"%{q}%", f"%{q}%", f"%{q}%"] if q else []
+    rows = db.execute(query, q_params).fetchall()
     return render_template("front_desk/results.html", rows=rows, filter_type=filter_type,
-                            filter_label=filter_label)
+                            filter_label=filter_label, q=q)
+
+
+@app.route("/search")
+@login_required
+def global_result_search():
+    """بحث سريع وشامل عن أي نتيجة (باسم المريض / رقم التسجيل / الباركود)
+    -- متاح بكل الصفحات وكل الواجهات الثلاث (استقبال/مختبر/الاثنين معًا)
+    عبر مربع البحث بأعلى شريط base.html، بما فيها أعلى صفحة \"زيارة
+    جديدة\" مباشرة. لا يتقيّد بأي فلتر (يشمل حتى التحاليل المُرسَلة
+    لشاشة الاستقبال والمختفية من القائمة الافتراضية بصفحة Orders).
+    يعرض لكل نتيجة رابط متابعة يناسب الواجهة الحالية للمستخدم فقط، حتى
+    لا يوصل لصفحة ممنوعة عنه (enforce_interface_scope)."""
+    q = (request.args.get("q") or "").strip()
+    rows = []
+    if len(q) >= 2:
+        db = get_db()
+        rows = db.execute(
+            "SELECT ot.id, ot.status, ot.sent_to_reception, ot.printed_at, "
+            "td.name as test_name, td.department, "
+            "p.full_name as patient_name, v.id as visit_id, v.registration_number, v.created_at "
+            "FROM order_tests ot "
+            "JOIN test_definitions td ON td.id = ot.test_definition_id "
+            "JOIN orders o ON o.id = ot.order_id "
+            "JOIN visits v ON v.id = o.visit_id "
+            "JOIN patients p ON p.id = v.patient_id "
+            "WHERE p.full_name LIKE ? OR CAST(v.registration_number AS TEXT) LIKE ? OR ot.barcode LIKE ? "
+            "ORDER BY ot.id DESC LIMIT 100",
+            (f"%{q}%", f"%{q}%", f"%{q}%"),
+        ).fetchall()
+    return render_template("search_results.html", q=q, rows=rows)
 
 
 @app.route("/front-desk/followups")
@@ -4035,6 +4168,151 @@ def annual_report():
     return render_template("front_desk/annual_report.html", rows=rows, totals=totals, year=year)
 
 
+# ============================================================================
+# الحسابات الربع سنوية + صفحة "كل الحسابات" + البحث والتصدير
+# (ميزة مستقلة طلبها المستخدم بمحادثة سابقة — راجع accounts_search.py)
+# ============================================================================
+@app.route("/reports/quarter")
+@roles_required("admin", "accountant", "supervisor")
+def quarter_report():
+    db = get_db()
+    year = request.args.get("year", str(date.today().year))
+    quarter = request.args.get("quarter", str((date.today().month - 1) // 3 + 1))
+    start_month, end_month = acs.quarter_bounds(year, quarter)
+    rows, totals = period_breakdown(
+        db, 7,
+        "substr(v.created_at,1,4)=? AND CAST(substr(v.created_at,6,2) AS INTEGER) BETWEEN ? AND ?",
+        (year, start_month, end_month),
+    )
+    return render_template("front_desk/quarter_report.html", rows=rows, totals=totals,
+                            year=year, quarter=quarter)
+
+
+@app.route("/reports/accounts")
+@roles_required("admin", "accountant", "supervisor")
+def accounts_hub():
+    return render_template("front_desk/accounts_hub.html")
+
+
+def _accounts_search_run(db, args):
+    """منطق مشترك بين شاشة العرض وكلا رابطي التصدير — حتى نتائج الشاشة
+    ونتائج الملف المُصدَّر يطابقان بعض دائمًا (بنفس المعاملات بالضبط)."""
+    search_kind = args.get("kind", "basic")  # basic | doctor
+    date_from, date_to = acs.resolve_date_range(args)
+    test_ids = [int(x) for x in args.getlist("test_id") if x.strip().isdigit()]
+
+    if search_kind == "doctor":
+        doctor_name = (args.get("doctor_name") or "").strip()
+        if not doctor_name:
+            return search_kind, date_from, date_to, None
+        result = acs.run_doctor_search(db, doctor_name, date_from, date_to, test_ids)
+        return search_kind, date_from, date_to, result
+
+    mode = args.get("result_mode", "counts")  # counts | names
+    result = acs.run_basic_search(db, date_from, date_to, test_ids, mode)
+    result["mode"] = mode
+    return search_kind, date_from, date_to, result
+
+
+@app.route("/reports/accounts/search")
+@roles_required("admin", "accountant", "supervisor")
+def accounts_search():
+    db = get_db()
+    has_query = bool(request.args)
+    kind, date_from, date_to, result = _accounts_search_run(db, request.args) if has_query else (
+        request.args.get("kind", "basic"), None, None, None)
+    return render_template(
+        "front_desk/accounts_search.html",
+        kind=kind, date_from=date_from, date_to=date_to, result=result,
+        has_query=has_query,
+        test_choices=acs.get_test_choices(db),
+        doctor_choices=acs.get_examining_doctor_names(db),
+        selected_test_ids=[int(x) for x in request.args.getlist("test_id") if x.strip().isdigit()],
+        request_args=request.args,
+    )
+
+
+@app.route("/reports/accounts/search/export.xlsx")
+@roles_required("admin", "accountant", "supervisor")
+def accounts_search_export_xlsx():
+    db = get_db()
+    kind, date_from, date_to, result = _accounts_search_run(db, request.args)
+    if result is None:
+        flash("أكمل معايير البحث أولاً.")
+        return redirect(url_for("accounts_search", **request.args))
+
+    detail = request.args.get("detail", "full")  # full | short
+
+    if kind == "doctor":
+        if detail == "short":
+            columns = [("test_name", "التحليل"), ("count", "العدد"),
+                       ("rate", "أجر التحليل الواحد"), ("subtotal", "المجموع")]
+            rows = result["by_test_total"]
+            totals = {"test_name": "المجموع الكلي", "subtotal": result["total"]}
+            sheet_title = f"{result['doctor_name']}-مختصر"
+        else:
+            columns = [("patient_name", "اسم المريض"), ("test_name", "التحليل"),
+                       ("date", "التاريخ"), ("rate", "الأجر")]
+            rows = [dict(r, date=acs.ddmmyyyy(r["date"])) for r in result["patient_rows"]]
+            totals = {"patient_name": "المجموع الكلي", "rate": result["total"]}
+            sheet_title = f"{result['doctor_name']}-تفصيلي"
+        path = excel_export.export_rows_to_xlsx(columns, rows, sheet_title=sheet_title, totals_row=totals)
+        safe_name = re.sub(r"[^\w\-]+", "_", result["doctor_name"])
+        download_name = f"{safe_name}_{date_from}_{date_to}.xlsx"
+    else:
+        mode = result.get("mode", "counts")
+        if mode == "counts":
+            columns = [("test_name", "التحليل"), ("date", "التاريخ"), ("count", "العدد")]
+            rows = [dict(r, date=acs.ddmmyyyy(r["date"])) for r in result["rows"]]
+            totals = {"test_name": "المجموع الكلي", "count": result["total_count"]}
+        elif detail == "short":
+            columns = [("test_name", "التحليل"), ("date", "التاريخ"), ("price", "السعر")]
+            rows = [dict(r, date=acs.ddmmyyyy(r["date"])) for r in result["rows"]]
+            totals = {"test_name": "المجموع الكلي", "price": result["total_price"]}
+        else:
+            columns = [("patient_name", "اسم المريض"), ("age", "العمر"), ("gender", "الجنس"),
+                       ("reg_no", "رقم التسجيل"), ("test_name", "التحليل"),
+                       ("date", "التاريخ"), ("price", "السعر")]
+            rows = [dict(r, date=acs.ddmmyyyy(r["date"])) for r in result["rows"]]
+            totals = {"patient_name": "المجموع الكلي",
+                      "price": result.get("total_price", result.get("total_count", 0))}
+        path = excel_export.export_rows_to_xlsx(columns, rows, sheet_title="نتائج البحث", totals_row=totals)
+        download_name = f"accounts_search_{date_from}_{date_to}.xlsx"
+
+    log_action("Export", "accounts_search", 0, f"xlsx {kind} {date_from}..{date_to}")
+    return send_file(path, as_attachment=True, download_name=download_name)
+
+
+@app.route("/reports/accounts/search/export.pdf")
+@roles_required("admin", "accountant", "supervisor")
+def accounts_search_export_pdf():
+    import pdf_export
+
+    db = get_db()
+    kind, date_from, date_to, result = _accounts_search_run(db, request.args)
+    if result is None:
+        flash("أكمل معايير البحث أولاً.")
+        return redirect(url_for("accounts_search", **request.args))
+
+    detail = request.args.get("detail", "full")
+    html_content = render_template(
+        "front_desk/print_accounts_search.html",
+        kind=kind, date_from=date_from, date_to=date_to, result=result, detail=detail,
+    )
+    pdf_path = pdf_export.make_temp_pdf_path("accounts_search")
+    try:
+        pdf_export.html_to_pdf(html_content, request.url_root, pdf_path)
+    except Exception as exc:
+        flash(f"❌ تعذّر توليد ملف PDF: {exc}")
+        return redirect(url_for("accounts_search", **request.args))
+
+    log_action("Export", "accounts_search", 0, f"pdf {kind} {date_from}..{date_to}")
+    name_part = result["doctor_name"] if kind == "doctor" else "accounts_search"
+    safe_name = re.sub(r"[^\w\-]+", "_", name_part)
+    download_name = f"{safe_name}_{date_from}_{date_to}.pdf"
+    return send_file(pdf_path, as_attachment=True, download_name=download_name)
+
+
 
 @app.route("/workbench/samples-collection")
 @login_required
@@ -4146,10 +4424,16 @@ def orders_list():
         session["orders_date_filter"] = order_date
     else:
         order_date = session.get("orders_date_filter", "")
+    # q: بحث حر (اسم مريض / رقم تسجيل / باركود) -- المطلوب: أي موظف مختبر
+    # يقدر يدور على أي نتيجة، حتى لو كانت أصلاً "مُرسَلة" للاستقبال
+    # واختفت من القائمة الافتراضية تحتها. البحث يتجاهل فلتر "غير المُرسَلة"
+    # بالأسفل عمداً لهذا السبب بالذات.
+    q = request.args.get("q", "").strip()
     query = (
         "SELECT ot.id, ot.barcode, ot.status, ot.created_at, ot.fee_waived, ot.hidden_from_log, "
+        "ot.sent_to_reception, ot.sent_to_reception_at, ot.printed_at, "
         "td.name as test_name, td.code as test_code, td.department, td.sample_type, td.is_examining_test, "
-        "p.full_name as patient_name, v.registration_number "
+        "p.full_name as patient_name, v.id as visit_id, v.registration_number "
         "FROM order_tests ot "
         "JOIN test_definitions td ON td.id = ot.test_definition_id "
         "JOIN orders o ON o.id = ot.order_id "
@@ -4158,6 +4442,14 @@ def orders_list():
     )
     conditions = []
     params = []
+    if q:
+        conditions.append("(p.full_name LIKE ? OR CAST(v.registration_number AS TEXT) LIKE ? OR ot.barcode LIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+    else:
+        # بدون بحث: التحاليل اللي انرسلت أصلاً للاستقبال تختفي من هذي
+        # القائمة الافتراضية (خلصت مهمتها بشاشة المختبر) -- تبقى موجودة
+        # وتطلع فقط لو دوّر عليها أي موظف بمربع البحث فوق.
+        conditions.append("ot.sent_to_reception = 0")
     if status:
         conditions.append("ot.status = ?")
         params.append(status)
@@ -4170,7 +4462,7 @@ def orders_list():
     order_tests = db.execute(query, params).fetchall()
     fee_waiver_configured = bool(get_setting(db, "fee_waiver_password_hash", ""))
     return render_template("workbench/orders.html", order_tests=order_tests, status=status, order_date=order_date,
-                            fee_waiver_configured=fee_waiver_configured)
+                            fee_waiver_configured=fee_waiver_configured, q=q)
 
 
 @app.route("/workbench/orders/<int:order_test_id>/delete", methods=["POST"])
@@ -4245,6 +4537,96 @@ def toggle_order_test_fee_waiver(order_test_id):
     log_action("ToggleFeeWaiver", "order_tests", order_test_id,
                f"waived={new_val} hidden_from_log={hide_from_log} by={entered_name}")
     return {"ok": True, "fee_waived": new_val, "hidden_from_log": hide_from_log}
+
+
+@app.route("/workbench/orders/<int:order_test_id>/send-to-reception", methods=["POST"])
+@login_required
+def send_order_test_to_reception(order_test_id):
+    """إرسال نتيجة تحليل واحد مكتملة لشاشة الاستقبال حتى يطبعها موظف
+    الاستقبال ويسلمها للمريض -- يختفي هذا التحليل بعدها من القائمة
+    الافتراضية بصفحة Orders (شاشة المختبر)، ويظهر بصفحة النتائج بشاشة
+    الاستقبال مع إشعار/رنة جرس لموظف الاستقبال. reception_seen يصفّر
+    (0) وقت الإرسال حتى يحتسب ضمن الإشعارات غير المقروءة."""
+    db = get_db()
+    ot = db.execute("SELECT id, status FROM order_tests WHERE id=?", (order_test_id,)).fetchone()
+    if not ot:
+        flash("هذا الطلب غير موجود أصلاً.")
+        return redirect(url_for("orders_list"))
+    if ot["status"] not in ("Completed", "Verified"):
+        flash("لا يمكن إرسال تحليل نتيجته لسا غير مكتملة.")
+        return redirect(url_for("orders_list"))
+    db.execute(
+        "UPDATE order_tests SET sent_to_reception=1, sent_to_reception_at=?, reception_seen=0 WHERE id=?",
+        (datetime.now().isoformat(timespec="seconds"), order_test_id),
+    )
+    db.commit()
+    log_action("SendToReception", "order_tests", order_test_id, "")
+    flash("✅ أُرسلت النتيجة لشاشة الاستقبال.")
+    return redirect(url_for("orders_list"))
+
+
+@app.route("/workbench/visits/<int:visit_id>/send-to-reception", methods=["POST"])
+@login_required
+def send_visit_to_reception(visit_id):
+    """إرسال كل نتائج هذي الزيارة المكتملة (Completed/Verified) وغير
+    المُرسَلة سابقًا دفعة وحدة لشاشة الاستقبال -- اختصار بدل إرسال كل
+    تحليل لحاله لما تكون كل نتائج الزيارة جاهزة سوا."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT ot.id FROM order_tests ot JOIN orders o ON o.id = ot.order_id "
+        "WHERE o.visit_id=? AND ot.status IN ('Completed','Verified') AND ot.sent_to_reception=0",
+        (visit_id,),
+    ).fetchall()
+    if not rows:
+        flash("لا توجد نتائج مكتملة جديدة بهذي الزيارة لإرسالها.")
+        return redirect(url_for("orders_list"))
+    now = datetime.now().isoformat(timespec="seconds")
+    for r in rows:
+        db.execute(
+            "UPDATE order_tests SET sent_to_reception=1, sent_to_reception_at=?, reception_seen=0 WHERE id=?",
+            (now, r["id"]),
+        )
+    db.commit()
+    log_action("SendVisitToReception", "visits", visit_id, f"count={len(rows)}")
+    flash(f"✅ أُرسلت {len(rows)} نتيجة لشاشة الاستقبال.")
+    return redirect(url_for("orders_list"))
+
+
+@app.route("/front-desk/notifications/check")
+@login_required
+def front_desk_notifications_check():
+    """يُستدعى دوريًا (polling) من شريط شاشة الاستقبال بكل صفحاتها —
+    يرجّع عدد النتائج المُرسَلة غير المقروءة بعد (لتشغيل رنة الجرس
+    والإشعار المرئي) مع تفاصيلها المختصرة لعرضها بالإشعار."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT ot.id, td.name as test_name, p.full_name as patient_name, v.registration_number "
+        "FROM order_tests ot "
+        "JOIN test_definitions td ON td.id = ot.test_definition_id "
+        "JOIN orders o ON o.id = ot.order_id "
+        "JOIN visits v ON v.id = o.visit_id "
+        "JOIN patients p ON p.id = v.patient_id "
+        "WHERE ot.sent_to_reception=1 AND ot.reception_seen=0 "
+        "ORDER BY ot.sent_to_reception_at DESC LIMIT 20"
+    ).fetchall()
+    items = [
+        {"id": r["id"], "test_name": r["test_name"], "patient_name": r["patient_name"],
+         "registration_number": r["registration_number"]}
+        for r in rows
+    ]
+    return jsonify({"count": len(items), "items": items})
+
+
+@app.route("/front-desk/notifications/mark-seen", methods=["POST"])
+@login_required
+def front_desk_notifications_mark_seen():
+    """يوقف الإشعار/الرنة بعد ما يشوفها موظف الاستقبال مرة وحدة -- ما
+    يمسح الحالة \"مُرسَلة\" نفسها (تبقى النتيجة تظهر بصفحة النتائج لحد
+    ما تُطبع فعليًا)، فقط يوقف تكرار رنة الجرس لنفس النتيجة."""
+    db = get_db()
+    db.execute("UPDATE order_tests SET reception_seen=1 WHERE sent_to_reception=1 AND reception_seen=0")
+    db.commit()
+    return jsonify({"ok": True})
 
 
 def save_order_test_results(db, ot, parameters, form, user_id, field_prefix="", patient_id=None):
@@ -4926,7 +5308,7 @@ def print_combined_panel(visit_id):
         # حاليًا (راجع partials/stamp_picker.html لطريقة استخدامها بالقالب).
         stamp_target_type="visit", stamp_target_id=visit_id,
         digital_stamps=get_digital_stamps(db),
-        stamp_placements=get_stamp_placements(db, "visit", visit_id),
+        stamp_placements=_serialize_stamp_placements(get_stamp_placements(db, "visit", visit_id)),
     )
 
 
@@ -4973,7 +5355,7 @@ def _print_report_impl(order_test_id):
         "td.done_by_note as done_by_note, "
         "p.id as patient_id, p.full_name as patient_name, p.gender, p.age, p.age_unit, "
         "v.id as visit_id, v.created_at as visit_created_at, v.registration_number, "
-        "v.doctor_id, v.referral_center_id, "
+        "v.doctor_id, v.referral_center_id, v.examining_doctor, "
         "d.full_name as referring_doctor_name, rc.name as referral_center_name "
         "FROM order_tests ot "
         "JOIN test_definitions td ON td.id = ot.test_definition_id "
@@ -4987,6 +5369,17 @@ def _print_report_impl(order_test_id):
     ).fetchone()
     if not ot:
         return "Not found", 404
+
+    # أول فتحة فعلية لتقرير هذا التحليل (طباعة مفردة، ضمن حزمة نتائج
+    # الزيارة، أو حتى توليد PDF لواتساب/الأرشيف يمر من هنا) تُثبَّت
+    # كـ"تمت طباعتها" -- بعدها أي تعديل على النتيجة أو معلومات المريض
+    # يحتاج دخول يوزر/باسورد مسؤول أو مشرف (راجع _check_completed_result_gate).
+    if ot["status"] in ("Completed", "Verified") and not ot["printed_at"]:
+        db.execute(
+            "UPDATE order_tests SET printed_at=? WHERE id=?",
+            (datetime.now().isoformat(timespec="seconds"), order_test_id),
+        )
+        db.commit()
 
     template_name = REPORT_TEMPLATE_MAP.get(ot["test_code"])
 
@@ -5265,6 +5658,31 @@ def _print_report_impl(order_test_id):
     macro_params, micro_params = _build_exam_sections(ot["test_code"], parameters, report_layout)
 
     auto_flag_color_enabled, show_result_flag, flag_color_map = get_report_flag_settings(db)
+
+    # الإلصاق التلقائي للختم/التوقيع (المطلوب: يظهر ختم الدكتور الفاحص
+    # تلقائيًا بمجرد اختياره كفاحص لهذي الزيارة، بدون أي سحب يدوي، +
+    # ختم المختبر الافتراضي إن وُجد). يشتغل فقط لو صندوق الختم مفعّل لهذا
+    # التحليل (enable_stamp_widget) ولو ما فيه أي إلصاق يدوي محفوظ مسبقًا
+    # لهذا التقرير بالذات — أي تحريك يدوي سابق (سحب المستخدم للختم بنفسه)
+    # يبقى له الأولوية دائمًا ولا يُتجاوَز أبدًا. راجع find_stamps_for_report
+    # وupsert_stamp_placement بـdatabase.py.
+    _stamp_placements = get_stamp_placements(db, "order_test", order_test_id)
+    if bool(ot["enable_stamp_widget"]) if "enable_stamp_widget" in ot.keys() else False:
+        if not _stamp_placements:
+            _auto_stamps = find_stamps_for_report(db, ot["examining_doctor"] if "examining_doctor" in ot.keys() else "")
+            _auto_x = 40
+            for _s in _auto_stamps:
+                # كل ختم بموضع افتراضي مختلف بالبداية حتى ما ينلصقون فوق
+                # بعض — يبقى كل واحد قابل للسحب لموضعه المفضّل بعدها بحرّية،
+                # وبمجرد ما يُسحب مرة وحدة يتسجّل بـreport_stamp_placements
+                # فيتوقف الإلصاق التلقائي لصالح الموضع المحفوظ من هذي اللحظة.
+                _stamp_placements.append({
+                    "id": None, "stamp_id": _s["id"], "label": _s["label"],
+                    "pos_x": _auto_x, "pos_y": 40, "width": _s["default_width"],
+                    "image_filename": _s["image_filename"], "signature_filename": _s["signature_filename"],
+                })
+                _auto_x += (_s["default_width"] or 140) + 20
+
     return render_template(
         template_name,
         ot=ot, params=params, ranges=ranges, units=units, notes=notes, cbc_groups=cbc_groups,
@@ -5282,7 +5700,13 @@ def _print_report_impl(order_test_id):
         test_definition_id=ot["test_definition_id"],
         stamp_target_type="order_test", stamp_target_id=order_test_id,
         digital_stamps=get_digital_stamps(db),
-        stamp_placements=get_stamp_placements(db, "order_test", order_test_id),
+        # المطلوب: صورة التوقيع (الطبقة العلوية) كانت تختفي بمجرد ما يُحفظ
+        # أي إلصاق فعليًا بقاعدة البيانات (get_stamp_placements ما كانت
+        # تجيب عمود signature_filename أصلاً، وهنا كنا نمرر _stamp_placements
+        # الخام بدون تمريره عبر _serialize_stamp_placements) — النتيجة كانت
+        # صندوق ختم فاضي بلا توقيع فوقه بعد أول حفظ/سحب. صُحح بالسطرين
+        # سوا (راجع get_stamp_placements بـdatabase.py أيضًا).
+        stamp_placements=_serialize_stamp_placements(_stamp_placements),
         visit_date=visit_date, sex=ot["gender"] or "", age=age_display,
         patient_name=ot["patient_name"], patient_id=ot["registration_number"],
         referring_doctor_name=ot["referring_doctor_name"] or "",
@@ -7553,28 +7977,34 @@ def app_settings():
         pi_gap_raw = request.form.get("patient_info_top_gap", "").strip()
         if pi_gap_raw:
             try:
-                pi_gap = max(0, min(60, int(pi_gap_raw)))
+                pi_gap = max(-20, min(150, int(pi_gap_raw)))
                 set_setting(db, "patient_info_top_gap", str(pi_gap))
             except ValueError:
                 pass
+        # المطلوب 2: توسيع نطاق مسافات معلومات المريض (فوق-تحت وبين
+        # اليمين-اليسار) لأبعد بكثير من الحدود القديمة (كانت 0-30 للمسافة
+        # العمودية و0-150 للمسافة الأفقية) — بطلب صريح من المستخدم إنه
+        # يحتاج يصغّر أو يكبّر أكثر مما كان متاحاً بالإعدادات القديمة.
+        # القيمة الافتراضية (لو الحقل فاضي) ما تغيّرت، فقط سقف/أرضية
+        # القيم المسموحة اتوسّعت.
         pi_label_w_raw = request.form.get("patient_info_label_width", "").strip()
         if pi_label_w_raw:
             try:
-                pi_label_w = max(60, min(220, int(pi_label_w_raw)))
+                pi_label_w = max(20, min(400, int(pi_label_w_raw)))
                 set_setting(db, "patient_info_label_width", str(pi_label_w))
             except ValueError:
                 pass
         pi_row_gap_raw = request.form.get("patient_info_row_gap", "").strip()
         if pi_row_gap_raw:
             try:
-                pi_row_gap = max(0, min(30, int(pi_row_gap_raw)))
+                pi_row_gap = max(-10, min(80, int(pi_row_gap_raw)))
                 set_setting(db, "patient_info_row_gap", str(pi_row_gap))
             except ValueError:
                 pass
         pi_col_gap_raw = request.form.get("patient_info_col_gap", "").strip()
         if pi_col_gap_raw:
             try:
-                pi_col_gap = max(0, min(150, int(pi_col_gap_raw)))
+                pi_col_gap = max(0, min(400, int(pi_col_gap_raw)))
                 set_setting(db, "patient_info_col_gap", str(pi_col_gap))
             except ValueError:
                 pass
@@ -8378,7 +8808,13 @@ def stamp_add():
         kind = "stamp"
     linked_doctor_raw = request.form.get("linked_examining_doctor_id") or ""
     linked_doctor_id = int(linked_doctor_raw) if linked_doctor_raw.isdigit() else None
+    is_lab_default = bool(request.form.get("is_lab_default"))
     file = request.files.get("image")
+    # signature_image: صورة توقيع منفصلة اختيارية — تُلصق فوق صورة الختم
+    # مباشرة (ملاصقة بدون فراغ) وتتحرك معها كوحدة واحدة دائمًا (راجع
+    # partials/stamp_picker.html). اتركها فاضية لو الصورة المرفوعة أعلاه
+    # أصلاً تجمع الختم والتوقيع سوا بصورة واحدة.
+    sig_file = request.files.get("signature_image")
 
     if not label:
         flash("اسم/تسمية الختم أو التوقيع مطلوبة (مثلاً: ختم د. خليل حمود).")
@@ -8390,19 +8826,28 @@ def stamp_add():
     if ext not in ALLOWED_STAMP_EXT:
         flash("صيغة الصورة غير مدعومة — استخدم PNG أو JPG أو WEBP.")
         return redirect(url_for("stamps_manage"))
+    sig_ext = ""
+    if sig_file and sig_file.filename:
+        sig_ext = sig_file.filename.rsplit(".", 1)[-1].lower() if "." in sig_file.filename else ""
+        if sig_ext not in ALLOWED_STAMP_EXT:
+            flash("صيغة صورة التوقيع غير مدعومة — استخدم PNG أو JPG أو WEBP.")
+            return redirect(url_for("stamps_manage"))
 
-    # نحجز id أولاً بصف مؤقت (اسم ملف فاضي) حتى نقدر نسمّي ملف الصورة
-    # stamp_<id>.png بنفس رقم الصف مباشرة، ثم نحدّثه بعد حفظ الصورة فعليًا.
-    new_id = add_digital_stamp(db, label, kind, image_filename="", 
+    # نحجز id أولاً بصف مؤقت (اسم ملف فاضي) حتى نقدر نسمّي ملفات الصور
+    # stamp_<id>.png / stamp_<id>_sig.png بنفس رقم الصف مباشرة، ثم نحدّثه
+    # بعد حفظ الصور فعليًا.
+    new_id = add_digital_stamp(db, label, kind, image_filename="",
                                 linked_examining_doctor_id=linked_doctor_id,
-                                created_by=session.get("user_id"))
+                                created_by=session.get("user_id"), is_lab_default=is_lab_default)
     try:
         filename = _save_stamp_image_on_white_bg(file, new_id)
+        sig_filename = _save_stamp_image_on_white_bg(sig_file, new_id, suffix="_sig") if sig_ext else None
     except Exception:
         delete_digital_stamp(db, new_id)
         flash("تعذّر معالجة الصورة المرفوعة — تأكد إنها صورة صالحة، وإن مكتبة Pillow مثبّتة على الجهاز (pip install Pillow).")
         return redirect(url_for("stamps_manage"))
-    db.execute("UPDATE digital_stamps SET image_filename=? WHERE id=?", (filename, new_id))
+    db.execute("UPDATE digital_stamps SET image_filename=?, signature_filename=? WHERE id=?",
+               (filename, sig_filename, new_id))
     db.commit()
     log_action("AddDigitalStamp", "digital_stamp", new_id, label)
     flash(f"تمت إضافة \"{label}\" لمكتبة الأختام والتواقيع.")
@@ -8420,10 +8865,11 @@ def stamp_update(stamp_id):
     linked_doctor_raw = request.form.get("linked_examining_doctor_id") or ""
     linked_doctor_id = int(linked_doctor_raw) if linked_doctor_raw.isdigit() else None
     is_active = bool(request.form.get("is_active"))
+    is_lab_default = bool(request.form.get("is_lab_default"))
     if not label:
         flash("اسم/تسمية الختم أو التوقيع مطلوبة.")
         return redirect(url_for("stamps_manage"))
-    update_digital_stamp(db, stamp_id, label, kind, linked_doctor_id, is_active)
+    update_digital_stamp(db, stamp_id, label, kind, linked_doctor_id, is_active, is_lab_default)
     log_action("UpdateDigitalStamp", "digital_stamp", stamp_id, label)
     flash(f"تم حفظ تعديلات \"{label}\".")
     return redirect(url_for("stamps_manage"))
@@ -8440,6 +8886,11 @@ def stamp_delete(stamp_id):
             os.remove(os.path.join(STAMPS_UPLOAD_DIR, stamp["image_filename"]))
         except OSError:
             pass
+        if stamp["signature_filename"]:
+            try:
+                os.remove(os.path.join(STAMPS_UPLOAD_DIR, stamp["signature_filename"]))
+            except OSError:
+                pass
         log_action("DeleteDigitalStamp", "digital_stamp", stamp_id, stamp["label"])
     flash("تم الحذف.")
     return redirect(url_for("stamps_manage"))
@@ -8475,15 +8926,7 @@ def api_report_stamps_get(target_type, target_id):
         return jsonify({"error": "target_type غير صحيح"}), 400
     db = get_db()
     placements = get_stamp_placements(db, target_type, target_id)
-    return jsonify([{
-        "placement_id": p["id"],
-        "stamp_id": p["stamp_id"],
-        "label": p["label"],
-        "pos_x": p["pos_x"],
-        "pos_y": p["pos_y"],
-        "width": p["width"] or p["default_width"],
-        "image_url": url_for("static", filename=f"uploads/stamps/{p['image_filename']}"),
-    } for p in placements])
+    return jsonify(_serialize_stamp_placements(placements))
 
 
 @app.route("/api/reports/<target_type>/<int:target_id>/stamps", methods=["POST"])

@@ -139,8 +139,11 @@
         {% if current_role in ['admin', 'accountant', 'supervisor'] %}
         <a class="nav-link {{ 'active' if request.path == url_for('daily_report') else '' }}" href="{{ url_for('daily_report') }}">🗓️ {{ t('daily_report') }}</a>
         <a class="nav-link {{ 'active' if request.path == url_for('monthly_report') else '' }}" href="{{ url_for('monthly_report') }}">📅 {{ t('monthly_report') }}</a>
+        <a class="nav-link {{ 'active' if request.path == url_for('quarter_report') else '' }}" href="{{ url_for('quarter_report') }}">📈 التقرير الربع سنوي</a>
         <a class="nav-link {{ 'active' if request.path == url_for('half_year_report') else '' }}" href="{{ url_for('half_year_report') }}">📆 {{ t('half_year_report') }}</a>
         <a class="nav-link {{ 'active' if request.path == url_for('annual_report') else '' }}" href="{{ url_for('annual_report') }}">📊 {{ t('annual_report') }}</a>
+        <a class="nav-link {{ 'active' if request.path == url_for('accounts_hub') else '' }}" href="{{ url_for('accounts_hub') }}">🗂️ كل الحسابات</a>
+        <a class="nav-link {{ 'active' if request.path == url_for('accounts_search') else '' }}" href="{{ url_for('accounts_search') }}">🔍 بحث وتصدير الحسابات</a>
         {% endif %}
         {% if current_role in ['admin', 'accountant'] %}
         <a class="nav-link {{ 'active' if request.path == url_for('rates') else '' }}" href="{{ url_for('rates') }}">💲 {{ t('rates') }}</a>
@@ -204,6 +207,14 @@
         {% endif %}
         {% block page_title %}{{ t('dashboard') }}{% endblock %}
       </div>
+      <div class="topbar-search" style="position:relative; flex:1; max-width:340px; margin:0 14px;">
+        <input type="text" id="lisQuickSearchInput" autocomplete="off"
+               placeholder="🔎 بحث سريع عن أي نتيجة (اسم/رقم تسجيل/باركود)"
+               style="width:100%; padding:6px 10px; border-radius:8px; border:1px solid rgba(0,0,0,.15);">
+        <div id="lisQuickSearchResults" style="display:none; position:absolute; top:100%; inset-inline-start:0;
+             width:340px; max-width:90vw; background:#fff; color:#222; border-radius:8px; margin-top:4px;
+             box-shadow:0 10px 30px rgba(0,0,0,.25); max-height:360px; overflow-y:auto; z-index:9998;"></div>
+      </div>
       <div class="controls">
         <button class="pill-btn {{ 'active' if lang=='en' }}" onclick="location.href='{{ url_for('set_lang', lang='en') }}'">EN</button>
         <button class="pill-btn {{ 'active' if lang=='ar' }}" onclick="location.href='{{ url_for('set_lang', lang='ar') }}'">AR</button>
@@ -250,6 +261,117 @@
     }
   });
 </script>
+<script>
+  // ------------------------------------------------------------------
+  // مربع البحث السريع العلوي (بشريط كل صفحة، كل الشاشات الثلاث) --
+  // المطلوب: الوصول السريع لأي نتيجة (اسم مريض/رقم تسجيل/باركود) من أي
+  // مكان بالبرنامج بدون المرور بصفحة Orders أو النتائج أول. يبحث عبر
+  // /api/results/quick-search (يحدّد الرابط المناسب لكل نتيجة حسب واجهة
+  // المستخدم الحالية من طرف السيرفر نفسه).
+  // ------------------------------------------------------------------
+  (function () {
+    var input = document.getElementById('lisQuickSearchInput');
+    var box = document.getElementById('lisQuickSearchResults');
+    if (!input || !box) return;
+    var debounceTimer = null;
+    function renderResults(items) {
+      if (!items.length) {
+        box.innerHTML = '<div style="padding:10px 12px; color:#777;">لا توجد نتائج مطابقة</div>';
+        box.style.display = 'block';
+        return;
+      }
+      box.innerHTML = items.map(function (it) {
+        var statusColor = (it.status === 'Verified') ? '#1d7a3e' : (it.status === 'Completed' ? '#2b6cb0' : '#888');
+        return '<a href="' + it.link + '" style="display:block; padding:8px 12px; text-decoration:none; ' +
+          'color:#222; border-bottom:1px solid #eee;">' +
+          '<div style="font-weight:700;">' + it.patient_name + ' <span class="mono" style="font-weight:400; color:#777;">#' + it.registration_number + '</span></div>' +
+          '<div style="font-size:12.5px; color:#555;">' + it.test_name +
+          ' — <span style="color:' + statusColor + ';">' + it.status + '</span></div>' +
+          '</a>';
+      }).join('');
+      box.style.display = 'block';
+    }
+    input.addEventListener('input', function () {
+      var q = input.value.trim();
+      clearTimeout(debounceTimer);
+      if (q.length < 2) {
+        box.style.display = 'none';
+        return;
+      }
+      debounceTimer = setTimeout(function () {
+        fetch('/api/results/quick-search?q=' + encodeURIComponent(q))
+          .then(function (r) { return r.json(); })
+          .then(function (data) { renderResults(data.items || []); })
+          .catch(function () {});
+      }, 250);
+    });
+    document.addEventListener('click', function (e) {
+      if (!box.contains(e.target) && e.target !== input) box.style.display = 'none';
+    });
+    input.addEventListener('focus', function () {
+      if (box.innerHTML.trim()) box.style.display = 'block';
+    });
+  })();
+</script>
+{% if session.get('interface') in (None, 'reception', 'both') %}
+<div id="lisResultToast" onclick="lisDismissResultToast()"
+     style="display:none; position:fixed; top:16px; left:50%; transform:translateX(-50%); z-index:10000;
+            background:#1d7a3e; color:#fff; padding:14px 22px; border-radius:10px;
+            box-shadow:0 10px 30px rgba(0,0,0,.3); font-weight:700; cursor:pointer; max-width:90vw; text-align:center;">
+</div>
+<script>
+  // ------------------------------------------------------------------
+  // إشعار + رنة جرس بسيطة لشاشة الاستقبال (شغّال بكل صفحاتها، لأن هذا
+  // السكربت بملف base.html المشترك) عند وصول نتيجة مكتملة جديدة
+  // مُرسَلة من شاشة المختبر (📤 بصفحة Orders) -- فحص دوري كل 8 ثواني عبر
+  // /front-desk/notifications/check. الرنة تُولَّد بـWeb Audio مباشرة
+  // (بدون ملف صوت خارجي)، وبعد عرضها نعلّم هذي العناصر "مقروءة"
+  // (mark-seen) حتى ما تتكرر الرنة لنفس النتيجة بالفحص التالي -- تبقى
+  // النتيجة نفسها ظاهرة بصفحة النتائج لحد ما تُطبع فعليًا.
+  // ------------------------------------------------------------------
+  (function () {
+    var NOTIF_URL = "{{ url_for('front_desk_notifications_check') }}";
+    var SEEN_URL = "{{ url_for('front_desk_notifications_mark_seen') }}";
+    function playBell() {
+      try {
+        var ctx = new (window.AudioContext || window.webkitAudioContext)();
+        [880, 1320].forEach(function (freq, i) {
+          var osc = ctx.createOscillator();
+          var gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          var t0 = ctx.currentTime + i * 0.18;
+          gain.gain.setValueAtTime(0.0001, t0);
+          gain.gain.exponentialRampToValueAtTime(0.25, t0 + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.35);
+          osc.connect(gain); gain.connect(ctx.destination);
+          osc.start(t0); osc.stop(t0 + 0.4);
+        });
+      } catch (e) { /* المتصفح ما يدعم الصوت -- الإشعار المرئي يبقى يشتغل لحاله */ }
+    }
+    function checkNotifications() {
+      fetch(NOTIF_URL).then(function (r) { return r.json(); }).then(function (data) {
+        if (data.count > 0) {
+          var toast = document.getElementById('lisResultToast');
+          var names = data.items.slice(0, 3).map(function (it) {
+            return it.patient_name + ' — ' + it.test_name;
+          }).join('، ');
+          toast.textContent = '🔔 نتيجة مكتملة وصلت للطباعة (' + data.count + '): ' + names +
+            (data.count > 3 ? ' ...' : '') + '  — اضغط للإخفاء';
+          toast.style.display = 'block';
+          playBell();
+          fetch(SEEN_URL, { method: 'POST' });
+        }
+      }).catch(function () {});
+    }
+    window.lisDismissResultToast = function () {
+      document.getElementById('lisResultToast').style.display = 'none';
+    };
+    checkNotifications();
+    setInterval(checkNotifications, 8000);
+  })();
+</script>
+{% endif %}
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 <a href="{{ url_for('designer_login') }}" title="⚙"
    style="position:fixed; bottom:10px; inset-inline-end:10px; opacity:.25; font-size:18px;

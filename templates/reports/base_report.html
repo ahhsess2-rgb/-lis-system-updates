@@ -162,7 +162,10 @@
     font-weight: bold;
     margin-bottom: 46px; /* فراغ لختم الدكتور الفاحص */
   }
-  .exam-signature-line { border-top: 1px solid #333; padding-top: 3px; font-size: 0.72em; color: #555; }
+  /* لا حدود ولا خط مطبوع هنا عمداً — المطلوب صندوق فاضٍ تماماً بلا
+     أي حدود حتى تُلصق فوقه صورة الختم/التوقيع الحقيقية، بدل خط توقيع
+     يدوي كما كان سابقاً. */
+  .exam-signature-line { min-height: 4px; }
 
   /* ============== بطاقة نتيجة تحليل مفردة (كيمياء/فيتامينات/فايروسات/تخثر) ==============
      كل تحليل يُعرض كـ"بطاقة" مستقلة بدل صف جدول عادي — بنفس ترتيب النموذج
@@ -423,12 +426,41 @@
           {{ shared.editor_script(order_test_id|default(0)) }}
           {% endif %}
 
-          {% if show_exam_signature %}
-          <div class="exam-signature-row">
-            <div class="exam-signature-box">
-              <div class="exam-signature-label">توقيع وختم الدكتور الفاحص<br><span style="font-weight:normal; font-style:italic; color:#555;">Examining Doctor Signature &amp; Stamp</span></div>
-              <div class="exam-signature-line">التوقيع / Signature</div>
+          {#
+            منطقة الختم والتوقيع: صور حقيقية تُلصق (مأخوذة فعليًا من
+            الختم/التوقيع الحي — راجع مكتبة الأختام بـ/management/stamps)
+            بدل أي عبارة نصية مطبوعة — حُذفت تسمية "توقيع وختم الدكتور
+            الفاحص" وأي عبارة "ختم المختبر" نهائيًا من الطباعة؛ الصورة
+            نفسها (باسمها الظاهر فقط بقائمة الاختيار غير المطبوعة) هي
+            كل ما يظهر. يظهر الصندوق فقط للتحاليل المفعّل لها الختم
+            (enable_stamp_widget من مصمم التقارير) — كان قبلها ناقص
+            include stamp_picker.html من الأساس فما كان يظهر أي شي هنا
+            إطلاقًا رغم وجود enable_stamp_widget بقاعدة البيانات، تم
+            تصحيحه هنا.
+            زر 👁️/🙈 يخفي كامل هذي المنطقة (الصندوق + أي ختم/توقيع مُلصق
+            فيها) دفعة وحدة لحد ما يُرجَّعها المستخدم — الحالة تُحفظ ضمن
+            نفس report_layout (hide_signature)، بنفس آلية الحفظ العامة
+            (نطاق: هذا المريض فقط / كل مرضى هذا التحليل) — راجع
+            examToggleSignature() وexamSerializeLayout() بـexam_report_shared.html.
+          #}
+          {% if enable_stamp_widget %}
+          {% if session.get('role') == 'admin' %}
+          <button type="button" id="examSignatureToggleBtn" class="no-print" onclick="examToggleSignature()"
+                  style="margin:6px 0; border:1px dashed #64748B; background:#fff; color:#334155; border-radius:5px; padding:3px 10px; font-size:12px; cursor:pointer;">
+            {{ '👁️ إظهار منطقة التوقيع والختم' if report_layout.hide_signature else '🙈 إخفاء منطقة التوقيع والختم' }}
+          </button>
+          {% endif %}
+          <div class="signature-area-wrap" data-hidden="{{ '1' if report_layout.hide_signature else '0' }}"
+               style="{{ 'display:none;' if report_layout.hide_signature else '' }}">
+            {% if show_exam_signature %}
+            <div class="exam-signature-row">
+              <div class="exam-signature-box">
+                <div class="exam-signature-line">&nbsp;</div>
+              </div>
             </div>
+            {% endif %}
+
+            {% include "partials/stamp_picker.html" %}
           </div>
           {% endif %}
 
