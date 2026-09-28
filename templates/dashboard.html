@@ -30,7 +30,7 @@
     inset: 0;
     background:
       linear-gradient(rgba(10, 16, 28, {{ (dashboard_bg_overlay_opacity|default(62)|int) / 100 }}), rgba(10, 16, 28, {{ (dashboard_bg_overlay_opacity|default(62)|int) / 100 }}))
-      {%- if dashboard_bg_url %}, url("{{ dashboard_bg_url }}") {{ dashboard_bg_position }} / cover no-repeat{% endif %},
+      {%- if dashboard_bg_url %}, url("{{ dashboard_bg_url }}") {{ dashboard_bg_position }} / {{ dashboard_bg_size_css|default("cover") }} no-repeat{% endif %},
       linear-gradient(135deg, #0f172a 0%, #1e293b 55%, #0f172a 100%);
     filter: blur({{ dashboard_bg_blur|default(2) }}px);
     transform: scale(1.03); /* يمنع ظهور حواف الـ blur */
@@ -39,7 +39,7 @@
   html.dark .dash-hero::before {
     background:
       linear-gradient(rgba(2, 6, 14, {{ (((dashboard_bg_overlay_opacity|default(62)|int) / 100) + 0.10) if ((dashboard_bg_overlay_opacity|default(62)|int) / 100) + 0.10 <= 1 else 1 }}), rgba(2, 6, 14, {{ (((dashboard_bg_overlay_opacity|default(62)|int) / 100) + 0.10) if ((dashboard_bg_overlay_opacity|default(62)|int) / 100) + 0.10 <= 1 else 1 }}))
-      {%- if dashboard_bg_url %}, url("{{ dashboard_bg_url }}") {{ dashboard_bg_position }} / cover no-repeat{% endif %},
+      {%- if dashboard_bg_url %}, url("{{ dashboard_bg_url }}") {{ dashboard_bg_position }} / {{ dashboard_bg_size_css|default("cover") }} no-repeat{% endif %},
       linear-gradient(135deg, #0b1220 0%, #131c2e 55%, #0b1220 100%);
   }
   .dash-hero-content {

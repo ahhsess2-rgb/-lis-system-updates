@@ -9,11 +9,17 @@
   .grid { display: flex; flex-wrap: wrap; gap: 12px; }
   .label { border: 1px dashed #999; border-radius: 6px; padding: 10px 14px; text-align: center; width: 220px; position: relative; }
   .lab-name { font-size: 11px; font-weight: 700; }
-  .patient { font-size: 13px; font-weight: 700; margin: 4px 0; }
+  .patient { font-size: 13px; font-weight: 700; margin: 4px 0 2px 0; }
+  /* تاريخ/وقت الطباعة أسفل اسم المريض مباشرة — استُبدل به رقم التسجيل
+     اللي كان يظهر سابقًا بنفس السطر (المطلوب: رقم التسجيل ما يظهر على
+     الملصق إطلاقًا، ويظهر بدله الوقت/التاريخ). */
+  .meta { font-size: 10px; color: #64748B; margin: 0 0 4px 0; }
   /* المطلوب: العنوان الرئيسي بكارد الأنبوب هو نوع العينة (Serum/Citrate/EDTA...)
      — هذا اللي يهم فنيّ المختبر فعليًا وقت التعامل مع الأنبوب، مو اسم
      تحليل واحد بعينه. أسماء التحاليل المتضمّنة تطلع تحته بخط أصغر كمرجع
-     اختياري بس (حسب طلب المستخدم: "مو شرط يذكر نوع التحليل"). */
+     اختياري بس (حسب طلب المستخدم: "مو شرط يذكر نوع التحليل"). عرض هذا
+     السطر أصلاً (كامل/مختصر/بدون) قابل للتحكم من شريط الإعدادات أعلى
+     الصفحة — راجع applyTestNamesMode() بالأسفل. */
   .sample-type { font-size: 14px; font-weight: 700; color: #1D4ED8; margin: 2px 0; }
   .test-list { font-size: 10.5px; color: #64748B; margin: 3px 0 6px 0; line-height: 1.35; }
   .test { font-size: 12px; color: #333; }
@@ -29,6 +35,12 @@
   .picker-box.open { display: block; }
   .individual-actions { margin-top: 10px; display: flex; gap: 10px; align-items: center; justify-content: center; }
   .individual-print-grid { display: none; }
+  .prefs-bar { display: flex; gap: 18px; align-items: center; justify-content: center; flex-wrap: wrap;
+    margin: 0 0 16px 0; padding: 10px 14px; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; }
+  .prefs-bar label { font-size: 13px; color: #334155; display: flex; align-items: center; gap: 6px; }
+  .prefs-bar input[type=number] { width: 55px; padding: 4px 6px; border: 1px solid #CBD5E1; border-radius: 5px; }
+  .prefs-bar select { padding: 4px 6px; border: 1px solid #CBD5E1; border-radius: 5px; }
+  .prefs-saved { font-size: 11.5px; color: #16A34A; visibility: hidden; }
   @media print {
     .no-print { display: none !important; }
     body.printing-individual .tube-grid { display: none !important; }
@@ -37,6 +49,8 @@
   }
 </style>
 <script>
+  var individualClones = []; // نسخ إضافية (حسب عدد النسخ المطلوب) مؤقتة، تُحذف بعد الطباعة مباشرة
+
   (function () {
     var savedTitle = null;
     window.addEventListener("beforeprint", function () { savedTitle = document.title; document.title = ""; });
@@ -44,6 +58,8 @@
       if (savedTitle !== null) document.title = savedTitle;
       document.body.classList.remove('printing-individual');
       document.querySelectorAll('.individual-card').forEach(function (card) { card.style.display = ''; });
+      individualClones.forEach(function (node) { node.remove(); });
+      individualClones = [];
     });
   })();
 
@@ -55,25 +71,141 @@
     var checked = document.querySelectorAll('.ind-check:checked');
     if (!checked.length) { alert('اختر تحليل وحد على الأقل قبل الطباعة.'); return; }
     var checkedBarcodes = Array.prototype.map.call(checked, function (c) { return c.getAttribute('data-barcode'); });
+    var visibleCards = [];
     document.querySelectorAll('.individual-card').forEach(function (card) {
-      card.style.display = checkedBarcodes.indexOf(card.getAttribute('data-barcode')) !== -1 ? '' : 'none';
+      var isChecked = checkedBarcodes.indexOf(card.getAttribute('data-barcode')) !== -1;
+      card.style.display = isChecked ? '' : 'none';
+      if (isChecked) visibleCards.push(card);
     });
+    var copies = getCopiesCount();
+    var grid = document.querySelector('.individual-print-grid');
+    for (var c = 1; c < copies; c++) {
+      visibleCards.forEach(function (card) {
+        var clone = card.cloneNode(true);
+        grid.appendChild(clone);
+        individualClones.push(clone);
+      });
+    }
     document.body.classList.add('printing-individual');
     window.print();
   }
+
+  // ===================== تفضيلات طباعة الباركود =====================
+  // عدد النسخ وطريقة عرض أسماء التحاليل — تُحفظ بالسيرفر (get_setting/
+  // set_setting) فتبقى نفس القيمة بكل طباعة قادمة إلى أن يغيّرها المستخدم
+  // بنفسه من هذا الشريط، بدل ما ترجع لنسخة وحدة/الاسم الكامل تلقائيًا.
+  var originalTubeGridHTML = null; // يُحفظ قبل أي تكرار للنسخ، حتى نقدر نرجع له كل طباعة
+
+  function shortenTestList(shortText) {
+    // "data-short" يجي جاهز من السيرفر: اختصار يدوي محدد لكل تحليل من
+    // كتالوج التحاليل (test_definitions.short_name) لو الأدمن حدده، وإلا
+    // الاسم الكامل نفسه. هذا التابع يقصّر إضافيًا فقط أي اسم لسا طويل
+    // (يعني ما له اختصار يدوي بعد) حتى ما يفيض عن الملصق.
+    return shortText.split('، ').map(function (name) {
+      name = name.trim();
+      return name.length > 14 ? name.slice(0, 14) + '…' : name;
+    }).join('، ');
+  }
+
+  function applyTestNamesMode(mode) {
+    document.querySelectorAll('.tube-grid .test-list').forEach(function (el) {
+      var full = el.getAttribute('data-full') || el.textContent;
+      var short = el.getAttribute('data-short') || full;
+      if (mode === 'none') {
+        el.style.display = 'none';
+      } else if (mode === 'short') {
+        el.style.display = '';
+        el.textContent = shortenTestList(short);
+      } else { // full
+        el.style.display = '';
+        el.textContent = full;
+      }
+    });
+  }
+
+  function getCopiesCount() {
+    var n = parseInt(document.getElementById('prefCopies').value, 10);
+    if (!n || n < 1) n = 1;
+    if (n > 20) n = 20;
+    return n;
+  }
+
+  function duplicateTubeLabels(copies) {
+    var grid = document.querySelector('.tube-grid');
+    if (!grid || originalTubeGridHTML === null) return;
+    grid.innerHTML = originalTubeGridHTML; // رجوع للأصل أول حتى لا تتراكم نسخ فوق نسخ كل طباعة
+    if (copies <= 1) return;
+    var originals = Array.prototype.slice.call(grid.children);
+    for (var c = 1; c < copies; c++) {
+      originals.forEach(function (node) { grid.appendChild(node.cloneNode(true)); });
+    }
+  }
+
+  function savePrefs(partial) {
+    var status = document.getElementById('prefsSaved');
+    fetch('/api/settings/barcode-print-prefs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(partial)
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      if (res.ok && status) {
+        status.style.visibility = 'visible';
+        setTimeout(function () { status.style.visibility = 'hidden'; }, 1500);
+      }
+    }).catch(function () {});
+  }
+
+  function onCopiesChanged() {
+    savePrefs({ copies: getCopiesCount() });
+  }
+
+  function onTestNamesModeChanged() {
+    var mode = document.getElementById('prefTestNamesMode').value;
+    applyTestNamesMode(mode);
+    savePrefs({ test_names_mode: mode });
+  }
+
+  function printTubes() {
+    applyTestNamesMode(document.getElementById('prefTestNamesMode').value);
+    duplicateTubeLabels(getCopiesCount());
+    window.print();
+  }
+
+  function preparePrint() {
+    originalTubeGridHTML = document.querySelector('.tube-grid').innerHTML;
+    printTubes();
+  }
 </script>
 </head>
-<body onload="window.print()">
+<body onload="preparePrint()">
+
+  <div class="no-print prefs-bar">
+    <label>
+      عدد النسخ:
+      <input type="number" id="prefCopies" min="1" max="20" value="{{ barcode_copies }}" onchange="onCopiesChanged()">
+    </label>
+    <label>
+      أسماء التحاليل:
+      <select id="prefTestNamesMode" onchange="onTestNamesModeChanged()">
+        <option value="full" {% if barcode_test_names_mode == 'full' %}selected{% endif %}>الاسم الكامل</option>
+        <option value="short" {% if barcode_test_names_mode == 'short' %}selected{% endif %}>مختصر</option>
+        <option value="none" {% if barcode_test_names_mode == 'none' %}selected{% endif %}>بدون</option>
+      </select>
+    </label>
+    <span id="prefsSaved" class="prefs-saved">✓ تم الحفظ</span>
+  </div>
 
   <h2 class="section-heading no-print">🧪 باركودات الأنابيب (حسب نوع العينة) — تُطبع تلقائيًا</h2>
   <div class="grid tube-grid">
     {% for s in tube_samples %}
     <div class="label">
-      <div class="lab-name">{{ brand_name }}</div>
-      <div class="patient">{{ visit['full_name'] }} — #{{ visit['registration_number'] }}</div>
+      <div class="lab-name">{{ lab_name_ar }}</div>
+      <div class="patient">{{ visit['full_name'] }}</div>
+      <div class="meta">{{ visit['created_at'] }}</div>
       <div class="sample-type">{{ s['sample_type'] }}</div>
       {% if s['test_names']|length > 1 %}
-      <div class="test-list">{{ s['test_names']|join('، ') }}</div>
+      <div class="test-list" data-full="{{ s['test_names']|join('، ') }}"
+           data-short="{{ s['short_names']|join('، ') }}">{{ s['test_names']|join('، ') }}</div>
       {% endif %}
       <img src="{{ url_for('barcode_image', code=s['barcode']) }}" alt="barcode">
     </div>
@@ -81,7 +213,7 @@
   </div>
 
   <div class="no-print" style="margin-top:20px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
-    <button onclick="window.print()">🖨 طباعة باركودات الأنابيب</button>
+    <button onclick="printTubes()">🖨 طباعة باركودات الأنابيب</button>
     <a href="{{ url_for('visits_list') }}" style="text-decoration:none;"><button type="button">🔙 الرجوع للزيارات</button></a>
     <button onclick="window.close()">❌ إغلاق النافذة</button>
   </div>
@@ -118,8 +250,9 @@
   <div class="grid individual-print-grid">
     {% for s in individual_samples %}
     <div class="label individual-card" data-barcode="{{ s['barcode'] }}">
-      <div class="lab-name">{{ brand_name }}</div>
-      <div class="patient">{{ visit['full_name'] }} — #{{ visit['registration_number'] }}</div>
+      <div class="lab-name">{{ lab_name_ar }}</div>
+      <div class="patient">{{ visit['full_name'] }}</div>
+      <div class="meta">{{ visit['created_at'] }}</div>
       <div class="test">{{ s['test_name'] }}</div>
       <div class="sample-type">{{ s['sample_type'] or '' }}</div>
       <img src="{{ url_for('barcode_image', code=s['barcode']) }}" alt="barcode">

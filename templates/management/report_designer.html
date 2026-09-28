@@ -18,6 +18,63 @@
     <button class="btn small" type="submit">حفظ</button>
   </form>
 
+  {# خيارات الختم والتوقيع + عمود كل باراميتر بالتقرير المطبوع #}
+  {% set _sp = selected_test['signature_position'] if 'signature_position' in selected_test.keys() else '' %}
+  {% set _show_lab = (selected_test['show_lab_stamp'] is none) or selected_test['show_lab_stamp'] %}
+  {% set _show_doc = (selected_test['show_doctor_stamp'] is none) or selected_test['show_doctor_stamp'] %}
+  <form method="POST" style="margin-bottom:18px;">
+    <input type="hidden" name="test_definition_id" value="{{ selected_test['id'] }}">
+    <input type="hidden" name="mode" value="print_options">
+    <div class="form-field">
+      <label>🖋️ خيارات الختم والتوقيع لهذا التحليل عند الطباعة</label>
+      <div style="display:flex; gap:18px; align-items:center; flex-wrap:wrap; margin-bottom:6px;">
+        <label style="display:flex; align-items:center; gap:5px; font-weight:normal;">
+          <input type="checkbox" name="show_lab_stamp" {{ 'checked' if _show_lab }}> إظهار ختم المختبر تلقائيًا
+        </label>
+        <label style="display:flex; align-items:center; gap:5px; font-weight:normal;">
+          <input type="checkbox" name="show_doctor_stamp" {{ 'checked' if _show_doc }}> إظهار ختم الدكتور الفاحص تلقائيًا
+        </label>
+        <label style="display:flex; align-items:center; gap:5px; font-weight:normal;">
+          <input type="checkbox" name="hide_signature_box" {{ 'checked' if selected_test['hide_signature_box'] }}> إخفاء صندوق التوقيع الفاضي
+        </label>
+        <label style="display:flex; align-items:center; gap:5px; font-weight:normal;">
+          موضع صندوق التوقيع:
+          <select name="signature_position">
+            <option value="" {{ 'selected' if not _sp }}>الافتراضي</option>
+            <option value="left" {{ 'selected' if _sp=='left' }}>يسار</option>
+            <option value="center" {{ 'selected' if _sp=='center' }}>وسط</option>
+            <option value="right" {{ 'selected' if _sp=='right' }}>يمين</option>
+          </select>
+        </label>
+      </div>
+      <span class="muted" style="font-size:0.8em; display:block; margin-bottom:8px;">
+        تنطبق فقط على التحاليل المفعّل لها خيار "إضافة ختم / توقيع" أعلاه. الافتراضي (كل الخيارات كما هي) = نفس السلوك القديم بدون أي تغيير. أي ختم سبق سحبه/تحريكه يدويًا على تقرير يبقى كما هو.
+      </span>
+      {% if selected_parameters %}
+      <label style="margin-top:6px; display:block;">📑 عمود كل باراميتر بالتقرير</label>
+      <table>
+        <thead><tr><th>الباراميتر</th><th>العمود</th></tr></thead>
+        <tbody>
+          {% for p in selected_parameters %}
+          {% set _rc = p['report_column'] if 'report_column' in p.keys() else '' %}
+          <tr>
+            <td>{{ p['name'] }}</td>
+            <td>
+              <select name="report_column_{{ p['id'] }}">
+                <option value="" {{ 'selected' if not _rc }}>تلقائي</option>
+                <option value="1" {{ 'selected' if _rc=='1' }}>العمود 1</option>
+                <option value="2" {{ 'selected' if _rc=='2' }}>العمود 2</option>
+              </select>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+    <button class="btn small" type="submit">حفظ خيارات الختم والأعمدة</button>
+  </form>
+
   <form method="POST" style="margin-bottom:18px;">
     <input type="hidden" name="test_definition_id" value="{{ selected_test['id'] }}">
     <input type="hidden" name="mode" value="done_by">

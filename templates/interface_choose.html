@@ -15,7 +15,7 @@
     <button type="button" class="btn" style="padding:14px;" onclick="chooseInterface('lab', {{ lab_configured|tojson }})">
       🧪 مختبر {% if current_interface == 'lab' %}(الحالية){% endif %}
     </button>
-    <button type="button" class="btn secondary" style="padding:14px;" onclick="chooseInterface('both', {{ both_configured|tojson }})">
+    <button type="button" class="btn secondary" style="padding:14px;" onclick="chooseInterface('both', {{ (both_configured|default(false))|tojson }})">
       🔀 الاثنين معًا {% if current_interface == 'both' %}(الحالية){% endif %}
     </button>
   </div>

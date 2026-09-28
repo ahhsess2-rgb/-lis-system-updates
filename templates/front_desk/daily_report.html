@@ -6,28 +6,26 @@
   .report-table th, .report-table td { border: 1px solid #E2E8F0; padding: 8px 10px; text-align: right; font-size: 13px; }
   .report-table th { background: #205072; color: #fff; }
   .report-table tfoot td { font-weight: 700; background: #F3F6F8; }
-  /* اسم المريض (المطلوب 2): يكفي عرضه بسطر واحد بدون ما ينزل لسطر ثاني */
+  /* اسم المريض: يكفي عرضه بسطر واحد بدون ما ينزل لسطر ثاني */
   .report-table td[data-col="name"] { white-space: nowrap; }
   .report-toolbar { margin-bottom: 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .report-toolbar a.pill { text-decoration:none; background:#F3F6F8; color:#205072; padding:6px 12px; border-radius:6px; font-size:12px; border:1px solid #E2E8F0; }
   .report-heading { font-size: 18px; color: #205072; margin-bottom: 2px; }
   .report-sub { color: #64748B; font-size: 13px; margin-bottom: 16px; }
-  /* اختيار الأعمدة المطلوب طباعتها (المطلوب 4) -- كل عمود بعتمد
-     data-col على th/td المطابقة، والمربع يطابقها بنفس الاسم. الإخفاء
-     display:none يشتغل بالشاشة وبالطباعة سوا (زر "الطباعة" يستخدم نفس
-     window.print() العادي، فأي عمود مخفي هون ما يظهر بالمطبوع ولا حتى
-     بمعاينة الطباعة). */
+  /* اختيار الأعمدة المطبوعة/المعروضة (إضافة أو حذف عمود) -- كل عمود
+     بعتمد data-col على th/td المطابقة، والمربع يطابقها بنفس الاسم.
+     الأعمدة الأساسية (checked افتراضيًا) هي بالضبط الترتيب المطلوب؛
+     أي عمود إضافي (مثل "الباقي") متروك غير مفعّل افتراضيًا -- يقدر
+     المستخدم يفعّله (إضافة عمود) أو يلغي أي عمود أساسي (حذف عمود)
+     بنفس الشريط، والاختيار يُحفظ بالمتصفح. */
   .cols-toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 12.5px; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px 12px; margin-bottom: 14px; }
   .cols-toolbar label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .cols-toolbar .extra-col { color: #64748B; }
   @media print {
     .report-toolbar, .cols-toolbar { display: none; }
   }
-  /* اتجاه الطباعة (عمودي/أفقي، المطلوب 4) -- محصور بملف هذا القالب
-     فقط (نفس أسلوب @page A5 المستخدم بقالب الفاتورة)، ويُعاد كتابته
-     بجافاسكربت عند الضغط على الزر لأن @page ما تتغيّر بكلاس عادي.
-     افتراضيًا "أفقي" لأن أعمدة هذا التقرير كثيرة وما تكفيها A4 عمودية
-     بكامل الأعمدة، لكن لو المستخدم خفى أغلب الأعمدة بشريط الاختيار
-     تحت، يقدر يرجعها عمودي بنفس الزر. */
+  /* اتجاه الطباعة (عمودي/أفقي) -- افتراضيًا "أفقي" لأن أعمدة هذا
+     التقرير كثيرة وما تكفيها A4 عمودية بكامل الأعمدة. */
   #printOrientationStyle { display: none; }
 </style>
 <style id="printOrientationStyle">@page { size: A4 landscape; margin: 10mm; }</style>
@@ -45,19 +43,30 @@
   <a class="pill" href="{{ url_for('dashboard') }}" style="margin-inline-start:auto;">🔙 الرجوع للرئيسية</a>
 </div>
 
+{#
+  ترتيب الأعمدة أدناه هو بالضبط الترتيب المطلوب، من اليمين لليسار (أول
+  عمود بالـmarkup = أقصى اليمين بصفحة RTL):
+  ت، الاسم الثلاثي، الجنس، العمر، الطبيب المرسل، التحاليل،
+  دكتور المختبر الفاحص + اجوره، الفحوصات المرسلة لمختبرات اخرى + اجورها،
+  الصرفيات العامة، الوارد الكلي، صافي الوارد الكلي، الملاحظات.
+  "الباقي" (المبلغ غير المحصَّل) عمود إضافي اختياري -- مو من الأساسيات
+  المطلوبة، لكن متروك هنا معطّل افتراضيًا كمثال حي على "إضافة عمود".
+#}
 <div class="cols-toolbar" id="colsToolbar">
-  <b>الأعمدة المطبوعة:</b>
+  <b>الأعمدة المعروضة/المطبوعة:</b>
   <label><input type="checkbox" data-col-toggle="reg" checked> ت</label>
-  <label><input type="checkbox" data-col-toggle="name" checked> اسم المريض</label>
-  <label><input type="checkbox" data-col-toggle="age" checked> العمر</label>
+  <label><input type="checkbox" data-col-toggle="name" checked> الاسم الثلاثي</label>
   <label><input type="checkbox" data-col-toggle="gender" checked> الجنس</label>
-  <label><input type="checkbox" data-col-toggle="doctors" checked> الدكتور المرسل</label>
+  <label><input type="checkbox" data-col-toggle="age" checked> العمر</label>
+  <label><input type="checkbox" data-col-toggle="referring_doctor" checked> الطبيب المرسل</label>
   <label><input type="checkbox" data-col-toggle="tests" checked> التحاليل</label>
-  <label><input type="checkbox" data-col-toggle="examining_doctor" checked> دكتور المختبر الفاحص</label>
-  <label><input type="checkbox" data-col-toggle="expenses" checked> الصرفيات</label>
-  <label><input type="checkbox" data-col-toggle="examining_fee" checked> أجور الفاحص</label>
-  <label><input type="checkbox" data-col-toggle="remaining" checked> الباقي</label>
+  <label><input type="checkbox" data-col-toggle="examining_doctor" checked> دكتور المختبر الفاحص + اجوره</label>
+  <label><input type="checkbox" data-col-toggle="forwarded" checked> الفحوصات المرسلة لمختبرات اخرى + اجورها</label>
+  <label><input type="checkbox" data-col-toggle="general_expenses" checked> الصرفيات العامة</label>
+  <label><input type="checkbox" data-col-toggle="total" checked> الوارد الكلي</label>
+  <label><input type="checkbox" data-col-toggle="net" checked> صافي الوارد الكلي</label>
   <label><input type="checkbox" data-col-toggle="notes" checked> الملاحظات</label>
+  <label class="extra-col"><input type="checkbox" data-col-toggle="remaining"> الباقي (غير المحصَّل) — عمود إضافي</label>
 </div>
 
 <div class="report-heading">{{ brand_name }} — التقرير اليومي</div>
@@ -67,16 +76,18 @@
   <thead>
     <tr>
       <th data-col="reg">ت</th>
-      <th data-col="name">اسم المريض الثلاثي</th>
-      <th data-col="age">العمر</th>
+      <th data-col="name">الاسم الثلاثي</th>
       <th data-col="gender">الجنس</th>
-      <th data-col="doctors">الدكتور المرسل</th>
+      <th data-col="age">العمر</th>
+      <th data-col="referring_doctor">الطبيب المرسل</th>
       <th data-col="tests">التحاليل</th>
-      <th data-col="examining_doctor">دكتور المختبر الفاحص</th>
-      <th data-col="expenses">الصرفيات</th>
-      <th data-col="examining_fee">أجور الفاحص</th>
-      <th data-col="remaining">الباقي</th>
+      <th data-col="examining_doctor">دكتور المختبر الفاحص + اجوره</th>
+      <th data-col="forwarded">الفحوصات المرسلة لمختبرات اخرى + اجورها</th>
+      <th data-col="general_expenses">الصرفيات العامة</th>
+      <th data-col="total">الوارد الكلي</th>
+      <th data-col="net">صافي الوارد الكلي</th>
       <th data-col="notes">الملاحظات</th>
+      <th data-col="remaining" style="display:none;">الباقي</th>
     </tr>
   </thead>
   <tbody>
@@ -84,28 +95,32 @@
     <tr>
       <td data-col="reg">{{ r.reg }}</td>
       <td data-col="name">{{ r.name }}</td>
-      <td data-col="age">{{ r.age }}</td>
       <td data-col="gender">{{ r.gender }}</td>
-      <td data-col="doctors">{{ r.doctors }}</td>
+      <td data-col="age">{{ r.age }}</td>
+      <td data-col="referring_doctor">{{ r.referring_doctor }}</td>
       <td data-col="tests">{{ r.tests }}</td>
-      <td data-col="examining_doctor">{{ r.examining_doctor }}</td>
-      <td data-col="expenses">{{ "%.0f"|format(r.expenses_only) }}</td>
-      <td data-col="examining_fee">{{ "%.0f"|format(r.examining_fee) }}</td>
-      <td data-col="remaining">{{ "%.0f"|format(r.remaining) }}</td>
+      <td data-col="examining_doctor">{{ r.examining_doctor }}{% if r.examining_fee %} — {{ "%.0f"|format(r.examining_fee) }}{% endif %}</td>
+      <td data-col="forwarded">{{ r.forwarded_display }}{% if r.forwarded_total %}{% if r.forwarded_display %} — {% endif %}الإجمالي: {{ "%.0f"|format(r.forwarded_total) }}{% endif %}</td>
+      <td data-col="general_expenses">{{ "%.0f"|format(r.general_expenses) }}</td>
+      <td data-col="total">{{ "%.0f"|format(r.total) }}</td>
+      <td data-col="net">{{ "%.0f"|format(r.net) }}</td>
       <td data-col="notes">{{ r.notes }}</td>
+      <td data-col="remaining" style="display:none;">{{ "%.0f"|format(r.remaining) }}</td>
     </tr>
     {% endfor %}
   </tbody>
   <tfoot>
-    <tr><td class="footer-label">الإجمالي الكلي</td><td data-col="remaining">{{ "%.0f"|format(grand_total) }}</td><td class="footer-spacer"></td></tr>
-    <tr><td class="footer-label">إجمالي الصرفيات (شامل أجور الفاحص وتكلفة أي تحليل مُرسَل لمختبر آخر)</td><td data-col="expenses">{{ "%.0f"|format(grand_expenses) }}</td><td class="footer-spacer"></td></tr>
-    <tr><td class="footer-label">الصافي (بعد خصم الصرفيات)</td><td data-col="remaining">{{ "%.0f"|format(grand_net) }}</td><td class="footer-spacer"></td></tr>
-    <tr><td class="footer-label">إجمالي المبلغ المتبقي (غير المحصَّل)</td><td data-col="remaining">{{ "%.0f"|format(grand_remaining) }}</td><td class="footer-spacer"></td></tr>
+    <tr><td class="footer-label">الإجمالي الكلي (الوارد)</td><td data-col="total">{{ "%.0f"|format(grand_total) }}</td><td class="footer-spacer"></td></tr>
+    <tr><td class="footer-label">إجمالي الصرفيات العامة</td><td data-col="general_expenses">{{ "%.0f"|format(grand_general_expenses) }}</td><td class="footer-spacer"></td></tr>
+    <tr><td class="footer-label">إجمالي كلفة الفحوصات المرسلة لمختبرات اخرى</td><td data-col="forwarded">{{ "%.0f"|format(grand_forwarded_total) }}</td><td class="footer-spacer"></td></tr>
+    <tr><td class="footer-label">إجمالي أجور دكتور المختبر الفاحص</td><td data-col="examining_doctor">{{ "%.0f"|format(grand_examining_fees) }}</td><td class="footer-spacer"></td></tr>
+    <tr><td class="footer-label">صافي الوارد الكلي (بعد خصم الصرفيات العامة وكلفة الإرسال وأجور الفاحص)</td><td data-col="net">{{ "%.0f"|format(grand_net) }}</td><td class="footer-spacer"></td></tr>
+    <tr><td class="footer-label">إجمالي المبلغ المتبقي (غير المحصَّل)</td><td data-col="remaining" style="display:none;">{{ "%.0f"|format(grand_remaining) }}</td><td class="footer-spacer"></td></tr>
   </tfoot>
 </table>
 
 <script>
-  // اتجاه الطباعة (عمودي/أفقي، المطلوب 4)
+  // اتجاه الطباعة (عمودي/أفقي)
   function applyOrientation(landscape) {
     document.getElementById('printOrientationStyle').textContent =
       '@page { size: A4 ' + (landscape ? 'landscape' : 'portrait') + '; margin: 10mm; }';
@@ -118,12 +133,13 @@
   }
   applyOrientation(localStorage.getItem('daily_report_landscape') !== '0');
 
-  // اختيار الأعمدة المطبوعة (المطلوب 4): إخفاء/إظهار كل عمود (ترويسة +
-  // كل خلاياه بالجدول، بما فيها صفوف الإجمالي بالأسفل)، مع حفظ الاختيار
-  // بالمتصفح. صفوف التذييل تصحّح colspan خلية "التسمية" تلقائيًا حسب
-  // عدد الأعمدة الظاهرة فعليًا قبل عمود القيمة، حتى تبقى الإجماليات
-  // مصطفة صح مهما كان أي عمود مخفي.
-  var COLUMN_ORDER = ['reg', 'name', 'age', 'gender', 'doctors', 'tests', 'examining_doctor', 'expenses', 'examining_fee', 'remaining', 'notes'];
+  // اختيار الأعمدة المعروضة/المطبوعة (إضافة أو حذف عمود): إخفاء/إظهار
+  // كل عمود (ترويسة + كل خلاياه بالجدول، بما فيها صفوف الإجمالي
+  // بالأسفل)، مع حفظ الاختيار بالمتصفح. صفوف التذييل تصحّح colspan خلية
+  // "التسمية" تلقائيًا حسب عدد الأعمدة الظاهرة فعليًا قبل عمود القيمة،
+  // حتى تبقى الإجماليات مصطفة صح مهما كان أي عمود مخفي أو مُضاف.
+  var COLUMN_ORDER = ['reg', 'name', 'gender', 'age', 'referring_doctor', 'tests', 'examining_doctor',
+                      'forwarded', 'general_expenses', 'total', 'net', 'notes', 'remaining'];
 
   function applyColumnVisibility() {
     var visibility = {};

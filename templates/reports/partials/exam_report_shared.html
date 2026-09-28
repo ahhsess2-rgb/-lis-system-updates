@@ -376,9 +376,19 @@
 {% endmacro %}
 
 
-{% macro resolve_value(row) -%}
+{# أي نتيجة عددية بأي تحليل (شامل أنواع الفلم الدموي WBC differential:
+   Neutrophils, Lymphocytes... الخ) تُعرض بدون ".0" الزائدة لو كانت رقماً
+   صحيحاً -- 1 بدل 1.0، 33 بدل 33.0 -- بينما أي رقم فيه كسر فعلي (مثلاً
+   12.5) يبقى يظهر بكسره كما هو، بكل مكان بدون استثناء. #}
+{% macro resolve_value(row, param_name=none) -%}
 {%- if row -%}
-  {%- if row['value_text'] not in (none, '') -%}{{ row['value_text'] }}{%- elif row['value_numeric'] is not none -%}{{ row['value_numeric'] }}{%- endif -%}
+  {%- if row['value_text'] not in (none, '') -%}{{ row['value_text'] }}
+  {%- elif row['value_numeric'] is not none -%}
+    {%- set v = row['value_numeric'] -%}
+    {%- if v == v|int -%}{{ v|int }}
+    {%- else -%}{{ v }}
+    {%- endif -%}
+  {%- endif -%}
 {%- endif -%}
 {%- endmacro %}
 
@@ -456,7 +466,7 @@
 {% if not has_custom_column %}
   {% for name in names %}
     {% if name in params_by_name %}
-      {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name)), param_notes.get(name, ''), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
+      {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name), name), param_notes.get(name, ''), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
     {% endif %}
   {% endfor %}
 {% else %}
@@ -465,7 +475,7 @@
     <div class="exam-column">
       {% for name in names %}
         {% if name in params_by_name and (param_overrides.get(name, {}).get('column') or 'center') == col %}
-          {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name)), param_notes.get(name, ''), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
+          {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name), name), param_notes.get(name, ''), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
         {% endif %}
       {% endfor %}
     </div>

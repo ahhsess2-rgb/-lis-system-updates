@@ -663,6 +663,15 @@ def migrate(conn):
                     ("is_home_visit", "INTEGER DEFAULT 0"), ("home_visit_address", "TEXT"),
                     ("home_visit_fee", "REAL DEFAULT 0")],
         "test_definitions": [("is_examining_test", "INTEGER DEFAULT 0"),
+                               # short_name: اختصار يدوي يحدده الأدمن لهذا التحليل تحديدًا
+                               # (مثال: "PT" بدل "زمن البروثرومبين") — يُستخدم فقط بملصق
+                               # باركود الأنبوب لما يختار المستخدم وضع "مختصر" لأسماء
+                               # التحاليل (راجع خيار "أسماء التحاليل" بشريط إعدادات صفحة
+                               # front_desk/print_sample_barcodes.html، ودالة
+                               # print_sample_barcodes بـapp.py). فاضي = يرجع تلقائيًا
+                               # لتقصير اسم التحليل الكامل بعدد أحرف ثابت (بدون اختصار
+                               # طبي معتمد) بدل ما يختفي الاسم كليًا.
+                               ("short_name", "TEXT"),
                                # report_group: اسم "الريبورت المجمّع" اللي ينتمي له هذا
                                # التحليل (مثلاً "Thyroid function test" أو "Viral study")،
                                # مستقل تماماً عن حقل department. يُستخدم فقط بلوحة الطباعة
@@ -678,6 +687,16 @@ def migrate(conn):
                                # يظهر الصندوق أبداً إلا إذا فعّله المدير صراحةً
                                # من صفحة مصمم التقارير.
                                ("enable_stamp_widget", "INTEGER DEFAULT 0"),
+                               # خيارات الختم/التوقيع لكل تحليل (مصمم التقارير > "خيارات الختم والتوقيع"):
+                               # show_lab_stamp / show_doctor_stamp: الافتراضي 1 = نفس السلوك
+                               # القديم تمامًا (يلصق ختم المختبر وختم الدكتور الفاحص تلقائيًا)،
+                               # و0 = لا يُلصق ذاك النوع تلقائيًا لهذا التحليل.
+                               # hide_signature_box: 1 = يخفي صندوق التوقيع الفاضي الثابت.
+                               # signature_position: left/center/right (فاضي = الافتراضي القديم).
+                               ("show_lab_stamp", "INTEGER DEFAULT 1"),
+                               ("show_doctor_stamp", "INTEGER DEFAULT 1"),
+                               ("hide_signature_box", "INTEGER DEFAULT 0"),
+                               ("signature_position", "TEXT"),
                                # panel_color / panel_page_break: تخصيص اختياري
                                # لهذا التحليل بـ"اللوحة المجمّعة" (combined_panel
                                # — لما تُطبع أكثر من تحليل سوا بنفس الورقة).
@@ -745,6 +764,9 @@ def migrate(conn):
                              # فاضي = يبقى name الأصلي كالسابق. لا يغيّر name
                              # الحقيقي المستخدم بحفظ/قراءة النتائج نفسها.
                              ("display_label", "TEXT"),
+                             # report_column: رقم العمود المفضّل للباراميتر بالتقرير (1 أو 2)،
+                             # فاضي = تلقائي. يُحفظ من مصمم التقارير.
+                             ("report_column", "TEXT"),
                              # value_align (المطلوب 11): موضع رقم النتيجة —
                              # near_name / center / near_unit. NULL/فاضي = نفس
                              # السلوك الحالي القديم تمامًا (لا يتغير أي تقرير

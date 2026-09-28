@@ -136,19 +136,53 @@
 
   function lisSaveThenPrint(url, title) {
     var form = document.getElementById('visitResultsForm');
-    var hasProtected = form && form.querySelectorAll('.badge-Completed, .badge-Verified').length > 0;
-    if (!form || hasProtected) {
-      // فيه نتيجة محمية بكلمة مرور بهذي الصفحة — ما نقدر نحفظ صامت
-      // بالخلفية (يحتاج تأكيد يوزر/باسورد تفاعلي)، نفتح المعاينة مباشرة
-      // بالقيم المحفوظة حالياً بقاعدة البيانات فقط (نفس السلوك القديم).
-      openReportModal(url, title);
+    if (!form) { openReportModal(url, title); return; }
+    var hasProtected = form.querySelectorAll('.badge-Completed, .badge-Verified').length > 0;
+    if (!hasProtected) {
+      // ما فيه نتيجة محمية -- حفظ صامت بالخلفية (بدون تنقّل/إعادة تحميل)
+      // ثم فتح المعاينة مباشرة، نفس السلوك السابق.
+      fetch(window.location.href, { method: 'POST', body: new FormData(form) })
+        .then(function () { lisDirty = false; })
+        .catch(function () { /* صامت — نفتح المعاينة بأي حال أدناه */ })
+        .then(function () { openReportModal(url, title); });
       return;
     }
-    fetch(window.location.href, { method: 'POST', body: new FormData(form) })
-      .then(function () { lisDirty = false; })
-      .catch(function () { /* صامت — نفتح المعاينة بأي حال أدناه */ })
-      .then(function () { openReportModal(url, title); });
+    // فيه نتيجة مكتملة/معتمدة بهذي الزيارة: نفس بوابة يوزر/باسورد مسؤول/
+    // مشرف المختبر المستخدمة لزر "💾 حفظ" العادي (تحتاج تأكيد تفاعلي، ما
+    // تنعمل بـfetch صامت بالخلفية) -- سابقًا كان هذا الزر يتجاوز الحفظ
+    // كليًا بهذي الحالة ويفتح المعاينة بالقيم القديمة المحفوظة بقاعدة
+    // البيانات فقط، فيطبع بيانات غير محدَّثة. هسه: نطلب نفس بيانات
+    // الدخول، ثم نسوي إرسال حقيقي (requestSubmit) بنفس بيانات الفورم +
+    // حقلي الدخول، فتنحفظ القيم الجديدة فعليًا وتُعاد الصفحة تحميلها، وبعد
+    // إعادة التحميل تنفتح معاينة الطباعة تلقائيًا (راجع السكربت اللي يقرأ
+    // sessionStorage['lisPendingPrint'] تحت).
+    if (!confirm('توجد نتيجة مكتملة أو معتمدة ضمن هذي الزيارة -- تعديلها يحتاج دخول مسؤول/مشرف المختبر حتى لو كنت أدمن.\nسيتم حفظ القيم الحالية أولًا ثم فتح معاينة الطباعة تلقائيًا بعد إعادة تحميل الصفحة. متابعة؟')) return;
+    var username = prompt('اسم مستخدم حساب مسؤول/مشرف المختبر لتأكيد التعديل:');
+    if (username === null) return;
+    var password = prompt('كلمة مرور نفس الحساب:');
+    if (password === null) return;
+    var uInput = document.createElement('input');
+    uInput.type = 'hidden'; uInput.name = 'gate_username'; uInput.value = username;
+    form.appendChild(uInput);
+    var pInput = document.createElement('input');
+    pInput.type = 'hidden'; pInput.name = 'gate_password'; pInput.value = password;
+    form.appendChild(pInput);
+    sessionStorage.setItem('lisPendingPrint', JSON.stringify({ url: url, title: title }));
+    lisDirty = false;
+    if (form.requestSubmit) { form.requestSubmit(); } else { form.submit(); }
   }
+
+  // بعد إعادة تحميل الصفحة (تبع الحفظ المحمي أعلاه)، لو فيه طباعة معلّقة
+  // محفوظة بـsessionStorage، افتحها تلقائيًا مرة وحدة ثم امسحها.
+  document.addEventListener('DOMContentLoaded', function () {
+    var pending = sessionStorage.getItem('lisPendingPrint');
+    if (!pending) return;
+    sessionStorage.removeItem('lisPendingPrint');
+    try {
+      var data = JSON.parse(pending);
+      openReportModal(data.url, data.title);
+    } catch (e) { /* تجاهل أي بيانات تالفة */ }
+  });
 </script>
 
 <script>
@@ -300,7 +334,7 @@
         <h4 style="margin:0;">{{ ot['test_name'] }}</h4>
         <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
           <button type="submit" class="btn small" title="حفظ كل نتائج هذه الصفحة (كل التحاليل الظاهرة، مو هذا التحليل بس)">💾 {{ t('save') }}</button>
-          <button type="button" class="btn small secondary" onclick="lisSaveThenPrint('{{ url_for('print_report', order_test_id=ot['id']) }}')" title="طباعة تقرير هذا التحليل فقط (يحفظ القيم المدخلة حالياً تلقائياً قبل الطباعة)">🖨️</button>
+          <button type="button" class="btn small secondary" onclick="lisSaveThenPrint('{{ url_for('print_report', order_test_id=ot['id']) }}')" title="طباعة تقرير هذا التحليل فقط (يحفظ القيم المدخلة حالياً تلقائياً قبل الطباعة -- لو النتيجة مكتملة/معتمدة يطلب دخول مسؤول/مشرف أولًا)">🖨️</button>
           <span class="badge badge-{{ ot['status'] }}">{{ ot['status'] }}</span>
         </div>
       </div>
@@ -644,6 +678,11 @@
       if (gateHandled) return;
       var hasProtected = form.querySelectorAll('.badge-Completed, .badge-Verified').length > 0;
       if (!hasProtected) return;
+      // لو زر الطباعة (lisSaveThenPrint فوق) هو اللي سوّى requestSubmit
+      // بعد ما جمع اسم المستخدم/كلمة المرور مسبقًا وحطّهم كحقول مخفية،
+      // ما نطلبهم مرة ثانية هون -- نخلي الإرسال يكمل عادي بنفس القيم.
+      var existingUser = form.querySelector('input[name="gate_username"]');
+      if (existingUser && existingUser.value) return;
       e.preventDefault();
       e.stopImmediatePropagation();
       if (!confirm('توجد نتيجة مكتملة أو معتمدة ضمن هذي الزيارة -- تعديلها يحتاج دخول مسؤول/مشرف المختبر حتى لو كنت أدمن. متابعة؟')) return;

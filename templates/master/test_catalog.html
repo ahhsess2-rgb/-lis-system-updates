@@ -26,6 +26,11 @@
       <input type="text" name="name" required>
     </div>
     <div class="form-field">
+      <label>اسم مختصر (اختياري)</label>
+      <input type="text" name="short_name" placeholder="مثلاً: PT">
+      <small class="muted">يُستخدم فقط بملصق باركود الأنبوب لما يُختار خيار "مختصر" لأسماء التحاليل — فاضي = يُقصَّر الاسم الكامل تلقائيًا وقت الطباعة.</small>
+    </div>
+    <div class="form-field">
       <label>{{ t('department') }}</label>
       <input type="text" name="department" placeholder="Hormones / BioChemistry / Viral Screen...">
     </div>
@@ -61,7 +66,7 @@
 <div class="card">
   <table>
     <thead><tr>
-      <th>{{ t('code') }}</th><th>{{ t('name') }}</th><th>{{ t('department') }}</th><th>الريبورت المجمّع</th><th>{{ t('sample_type') }}</th><th>{{ t('price') }}</th><th>فحص مؤهل لأجر دكتور فاحص</th>
+      <th>{{ t('code') }}</th><th>{{ t('name') }}</th><th>اسم مختصر</th><th>{{ t('department') }}</th><th>الريبورت المجمّع</th><th>{{ t('sample_type') }}</th><th>{{ t('price') }}</th><th>فحص مؤهل لأجر دكتور فاحص</th>
     </tr></thead>
     <tbody>
       {% for test in tests %}
@@ -77,6 +82,13 @@
           <div style="display:flex;align-items:center;gap:6px">
             <input type="text" class="field-edit-input" data-test-id="{{ test['id'] }}" data-field="name"
                    value="{{ test['name'] }}" style="width:180px">
+            <span class="field-save-status" style="font-size:12px;color:#2e7d32;visibility:hidden">✓</span>
+          </div>
+        </td>
+        <td>
+          <div style="display:flex;align-items:center;gap:6px">
+            <input type="text" class="field-edit-input" data-test-id="{{ test['id'] }}" data-field="short_name"
+                   value="{{ test['short_name'] or '' }}" placeholder="—" style="width:90px">
             <span class="field-save-status" style="font-size:12px;color:#2e7d32;visibility:hidden">✓</span>
           </div>
         </td>

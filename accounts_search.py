@@ -229,8 +229,159 @@ def run_doctor_search(db, doctor_name, date_from, date_to, test_ids):
     }
 
 
+# ---------------------------------------------------------------- بحث المختبر المُرسَل إليه --
+def get_forwarded_lab_names(db):
+    """أسماء كل المختبرات التي أُرسلت لها تحاليل فعلياً على الأقل مرة
+    (order_tests.forwarded_lab_name) لملء قائمة اختيار المختبر بشاشة
+    البحث -- نفس الاسم الحر المُدخَل وقت تسجيل الإرسال (راجع forwarded_lab_name
+    بـapp.py)، وليس بالضرورة كل أسماء referral_centers (فقط المُستخدَمة فعلاً)."""
+    rows = db.execute(
+        "SELECT DISTINCT forwarded_lab_name FROM order_tests "
+        "WHERE forwarded_lab_name IS NOT NULL AND TRIM(forwarded_lab_name) != '' "
+        "ORDER BY forwarded_lab_name"
+    ).fetchall()
+    return [r["forwarded_lab_name"] for r in rows]
+
+
+def run_lab_search(db, lab_name, date_from, date_to, test_ids):
+    """كل تحليل أُرسل فعليًا لمختبر معيّن (forwarded_lab_name) خلال فترة --
+    يرجّع dict فيها:
+      rows: [{"patient_name","test_name","date","cost"}...] تفصيل كل تحليل،
+            تنازليًا بالتاريخ.
+      total_count: عدد التحاليل المُرسَلة لهذا المختبر بالفترة.
+      total_cost: مجموع كلفتها (forwarded_cost) بالفترة.
+    fee_waived لا علاقة له هون (forwarded_cost كلفة تُدفع لمختبر آخر، مو
+    أجر يُستحصل من المريض، فتُحسب دائمًا بغض النظر عن حالة "مجاني")."""
+    test_where, test_params = _test_filter_sql(test_ids)
+    rows = db.execute(
+        f"""
+        SELECT p.full_name as patient_name, td.name as test_name,
+               substr(v.created_at,1,10) as day, ot.forwarded_cost as cost
+        FROM order_tests ot
+        JOIN orders o ON o.id = ot.order_id
+        JOIN visits v ON v.id = o.visit_id
+        JOIN patients p ON p.id = v.patient_id
+        JOIN test_definitions td ON td.id = ot.test_definition_id
+        WHERE ot.forwarded_lab_name = ?
+          AND substr(v.created_at,1,10) BETWEEN ? AND ?
+          AND {test_where}
+        ORDER BY v.created_at DESC, p.full_name
+        """,
+        [lab_name, date_from, date_to] + test_params,
+    ).fetchall()
+    out_rows = []
+    total_cost = 0.0
+    for r in rows:
+        cost = r["cost"] or 0
+        total_cost += cost
+        out_rows.append({
+            "patient_name": r["patient_name"], "test_name": r["test_name"],
+            "date": r["day"], "cost": cost,
+        })
+    return {
+        "lab_name": lab_name, "date_from": date_from, "date_to": date_to,
+        "rows": out_rows, "total_count": len(out_rows), "total_cost": total_cost,
+    }
+
+
 def get_examining_doctor_names(db):
     """أسماء الأطباء الفاحصين لملء قائمة اختيار الطبيب بشاشة البحث —
     نفس examining_doctors_list المستخدمة بباقي البرنامج."""
     rows = db.execute("SELECT name FROM examining_doctors_list ORDER BY sort_order, id").fetchall()
     return [r["name"] for r in rows]
+
+
+# ---------------------------------------------------------------- بحث مصدر الإحالة (طبيب مُرسِل / مختبر آخر / مباشر) --
+DIRECT_SOURCE_LABEL = "مباشر (بدون طبيب مُرسِل)"
+
+
+def get_referring_doctor_names(db):
+    """أسماء كل \"الأطباء المرسلين\" (جدول doctors -- الطبيب اللي حوّل
+    المريض لنا، غير جدول أطباء المختبر الفاحصين examining_doctors_list
+    كليًا) لملء قائمة اختيار الطبيب المرسل بشاشة البحث."""
+    rows = db.execute("SELECT full_name FROM doctors ORDER BY full_name").fetchall()
+    return [r["full_name"] for r in rows]
+
+
+def run_referral_search(db, date_from, date_to, test_ids, doctor_filter=None):
+    """يجاوب على: \"كم مريض أُجري له هذا التحليل، وكم استحصلنا منهم، وجاؤونا
+    عن طريق مين\" -- لكل تحليل (أو كل التحاليل)، مقسَّمة حسب مصدر الإحالة:
+      - كل طبيب مُرسِل على حدة (جدول doctors -- الطبيب اللي أرسل المريض
+        لنا، عبر order_tests.doctor_id لهذا التحليل بالذات إن وُجد وإلا
+        visits.doctor_id للزيارة كاملة).
+      - كل \"مختبر آخر أرسل المريض لنا\" على حدة (جدول referral_centers عبر
+        visits.referral_center_id).
+      - \"مباشر بدون طبيب مُرسِل\" (لا الاثنين مذكورين بالزيارة).
+
+    doctor_filter: اسم طبيب مُرسِل محدَّد (نص) -- لو مُمرَّر، تُحصر
+    النتيجة على هذا الطبيب فقط (سطر وحد). لو فاضي/None: تُعرض كل الأطباء
+    المُرسِلين + كل مراكز الإحالة + \"مباشر\" كل وحدة على حدة -- وهذا
+    يحقق \"بشكل عام كم مريض جانا مباشرة أو عبر طبيب أو عبر مختبر آخر\".
+
+    يرجّع dict فيها:
+      rows: [{\"source_type\": doctor|center|direct, \"source_name\",
+              \"patient_count\" (مرضى مختلفون), \"visit_test_count\"
+              (عدد مرات إجراء التحليل، قد يزيد عن عدد المرضى لو تكرر),
+              \"revenue\" (مجموع الأسعار، fee_waived مُستثنى)}...]
+             مرتبة: الأطباء أولًا (الأكثر عددًا فالأقل)، ثم مراكز
+             الإحالة، ثم \"مباشر\" أخيرًا.
+      total_patient_count, total_visit_test_count, total_revenue: إجمالي
+             كل المصادر مجتمعة (حتى لو فُلترت لطبيب وحد، يبقى هذا هو
+             إجمالي ذاك الطبيب فقط).
+    """
+    test_where, test_params = _test_filter_sql(test_ids)
+    rows = db.execute(
+        f"""
+        SELECT p.id as patient_id,
+               d.full_name as doctor_name, rc.name as center_name,
+               COALESCE(ot.price, td.price) as price, ot.fee_waived as fee_waived
+        FROM order_tests ot
+        JOIN orders o ON o.id = ot.order_id
+        JOIN visits v ON v.id = o.visit_id
+        JOIN patients p ON p.id = v.patient_id
+        JOIN test_definitions td ON td.id = ot.test_definition_id
+        LEFT JOIN doctors d ON d.id = COALESCE(ot.doctor_id, v.doctor_id)
+        LEFT JOIN referral_centers rc ON rc.id = v.referral_center_id
+        WHERE substr(v.created_at,1,10) BETWEEN ? AND ?
+          AND {test_where}
+        """,
+        [date_from, date_to] + test_params,
+    ).fetchall()
+
+    groups = {}  # (source_type, source_name) -> {"patients": set(), "count": n, "revenue": x}
+    for r in rows:
+        if r["doctor_name"]:
+            if doctor_filter and r["doctor_name"] != doctor_filter:
+                continue
+            key = ("doctor", r["doctor_name"])
+        elif doctor_filter:
+            continue  # فُلتر على طبيب معيّن: نتجاهل مراكز الإحالة والمباشر
+        elif r["center_name"]:
+            key = ("center", r["center_name"])
+        else:
+            key = ("direct", DIRECT_SOURCE_LABEL)
+
+        g = groups.setdefault(key, {"source_type": key[0], "source_name": key[1],
+                                     "patients": set(), "visit_test_count": 0, "revenue": 0.0})
+        g["patients"].add(r["patient_id"])
+        g["visit_test_count"] += 1
+        if not r["fee_waived"]:
+            g["revenue"] += (r["price"] or 0)
+
+    order_key = {"doctor": 0, "center": 1, "direct": 2}
+    out_rows = []
+    for g in groups.values():
+        out_rows.append({
+            "source_type": g["source_type"], "source_name": g["source_name"],
+            "patient_count": len(g["patients"]), "visit_test_count": g["visit_test_count"],
+            "revenue": g["revenue"],
+        })
+    out_rows.sort(key=lambda x: (order_key[x["source_type"]], -x["visit_test_count"]))
+
+    return {
+        "rows": out_rows,
+        "total_patient_count": len({pid for g in groups.values() for pid in g["patients"]}),
+        "total_visit_test_count": sum(r["visit_test_count"] for r in out_rows),
+        "total_revenue": sum(r["revenue"] for r in out_rows),
+        "doctor_filter": doctor_filter,
+    }

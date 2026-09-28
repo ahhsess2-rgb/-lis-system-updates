@@ -56,6 +56,46 @@
     = {{ '%.0f'|format(result.total) }}
   </div>
 
+{% elif kind == 'lab' %}
+  <h2>كشف تحاليل مُرسَلة — {{ result.lab_name }}</h2>
+  <div class="sub">الفترة من {{ date_from|ddmmyyyy }} إلى {{ date_to|ddmmyyyy }}</div>
+  <table>
+    <thead><tr><th>المريض</th><th>التحليل</th><th>التاريخ</th><th>الكلفة</th></tr></thead>
+    <tbody>
+      {% for r in result.rows %}
+      <tr><td>{{ r.patient_name }}</td><td>{{ r.test_name }}</td><td>{{ r.date|ddmmyyyy }}</td><td>{{ '%.0f'|format(r.cost) }}</td></tr>
+      {% endfor %}
+    </tbody>
+    <tfoot><tr><td colspan="3">المجموع الكلي (العدد: {{ result.total_count }})</td><td>{{ '%.0f'|format(result.total_cost) }}</td></tr></tfoot>
+  </table>
+  <div class="grand-total">
+    عدد التحاليل المُرسَلة لمختبر {{ result.lab_name }} خلال الفترة = {{ result.total_count }}،
+    ومجموع كلفتها = {{ '%.0f'|format(result.total_cost) }}
+  </div>
+
+{% elif kind == 'referral' %}
+  <h2>{{ 'كشف إحالات الدكتور — ' + result.doctor_filter if result.doctor_filter else 'تقسيم مصادر الإحالة' }}</h2>
+  <div class="sub">الفترة من {{ date_from|ddmmyyyy }} إلى {{ date_to|ddmmyyyy }}</div>
+  {% set source_type_ar = {'doctor': 'طبيب مُرسِل', 'center': 'مختبر آخر', 'direct': 'مباشر'} %}
+  <table>
+    <thead><tr><th>المصدر</th><th>الاسم</th><th>عدد المرضى</th><th>عدد مرات التحليل</th><th>المبلغ المُستحصَل</th></tr></thead>
+    <tbody>
+      {% for r in result.rows %}
+      <tr>
+        <td>{{ source_type_ar[r.source_type] }}</td><td>{{ r.source_name }}</td>
+        <td>{{ r.patient_count }}</td><td>{{ r.visit_test_count }}</td><td>{{ '%.0f'|format(r.revenue) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr><td colspan="2">الإجمالي</td><td>{{ result.total_patient_count }}</td>
+          <td>{{ result.total_visit_test_count }}</td><td>{{ '%.0f'|format(result.total_revenue) }}</td></tr>
+    </tfoot>
+  </table>
+  <div class="grand-total">
+    إجمالي عدد المرضى = {{ result.total_patient_count }}، والمبلغ المُستحصَل الكلي = {{ '%.0f'|format(result.total_revenue) }}
+  </div>
+
 {% else %}
   <h2>نتائج بحث الحسابات</h2>
   <div class="sub">الفترة من {{ date_from|ddmmyyyy }} إلى {{ date_to|ddmmyyyy }}</div>

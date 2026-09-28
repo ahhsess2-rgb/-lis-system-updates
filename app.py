@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, g, flash, send_file, jsonify
+from flask import Flask, render_template, request, redirect, url_for, session, g, flash, send_file, jsonify, get_flashed_messages
 from datetime import datetime, date, timedelta
 from functools import wraps
 from werkzeug.utils import secure_filename
@@ -1023,6 +1023,21 @@ def inject_globals():
     # لم تُحذف، بس مو موجودة بآخر نسخة رفعها المستخدم؛ أعدتها هنا لحد ما
     # يتأكد إذا يريدها يبقى أو يشيلها نهائيًا (سألته صراحة قبل الحذف).
     dashboard_bg_position = get_setting(db, "dashboard_bg_position", "center")
+    # حجم صورة خلفية شاشة الترحيب: cover (الافتراضي = السلوك القديم بالضبط،
+    # تملأ الشاشة وتُقصّ)، contain (تظهر كاملة بدون قص)، أو custom (نسبة
+    # مئوية من عرض الشاشة، الارتفاع تلقائي بنفس النسبة). يُترجم لقيمة CSS
+    # جاهزة هنا حتى يستخدمها dashboard.html مباشرة داخل background.
+    _bg_size_mode = get_setting(db, "dashboard_bg_size_mode", "cover")
+    _bg_size_pct = get_setting(db, "dashboard_bg_size_percent", "100")
+    if _bg_size_mode == "contain":
+        dashboard_bg_size_css = "contain"
+    elif _bg_size_mode == "custom":
+        try:
+            dashboard_bg_size_css = f"{max(5, min(400, int(_bg_size_pct)))}% auto"
+        except ValueError:
+            dashboard_bg_size_css = "cover"
+    else:
+        dashboard_bg_size_css = "cover"
     # عنوان وهاتف المختبر — اختياريان، يُضبطان مرة وحدة من الإعدادات (بطاقة
     # العلامة التجارية) ويظهران تلقائيًا بأي قالب يحتاجهم (خصوصًا فاتورة
     # A5 — نقطة #10) بدون تمريرهما يدويًا من كل route.
@@ -1089,12 +1104,14 @@ def inject_globals():
             license_banner = f"متبقي {lic['days_left']} يوم على انتهاء الفترة التجريبية"
     db.close()
     return dict(t=lambda key: t(lang, key), lang=lang,
-                current_user=session.get("full_name"), current_role=session.get("role"),
+                current_user=session.get("full_name") or ("المصمم" if session.get("designer_id") else None),
+                current_role=session.get("role") or ("designer" if session.get("designer_id") else None),
                 brand_name=brand_name, logo_url=logo_url,
                 dashboard_bg_url=dashboard_bg_url,
                 dashboard_bg_overlay_opacity=dashboard_bg_overlay_opacity,
                 dashboard_bg_blur=dashboard_bg_blur,
                 dashboard_bg_position=dashboard_bg_position,
+                dashboard_bg_size_css=dashboard_bg_size_css,
                 lab_address=lab_address, lab_phone=lab_phone,
                 report_row_pad=report_row_pad, report_col_pad=report_col_pad,
                 patient_info_top_gap=patient_info_top_gap,
@@ -1408,8 +1425,45 @@ def interface_choose():
     db = get_db()
     reception_configured = bool(get_setting(db, "interface_reception_password_hash", ""))
     lab_configured = bool(get_setting(db, "interface_lab_password_hash", ""))
-    return render_template("interface_choose.html", current_interface=session.get("interface"),
-                            reception_configured=reception_configured, lab_configured=lab_configured)
+    try:
+        return render_template("interface_choose.html", current_interface=session.get("interface"),
+                                reception_configured=reception_configured, lab_configured=lab_configured,
+                                both_configured=False)
+    except Exception:
+        # لو قالب interface_choose.html نفسه فيه خطأ، نطبع السبب الحقيقي
+        # (traceback) بنافذة السيرفر بدل صفحة 500 صماء، ونعرض صفحة اختيار
+        # بسيطة تشتغل فعلاً حتى يبقى تبديل الواجهة ممكن.
+        app.logger.exception("interface_choose.html failed to render")
+        return _interface_choose_fallback(reception_configured, lab_configured)
+
+
+def _interface_choose_fallback(reception_configured, lab_configured):
+    from markupsafe import escape
+    current = session.get("interface") or ""
+    def card(key, title, needs_pw):
+        pw = ('<input type="password" name="password" placeholder="كلمة مرور الواجهة" '
+              'style="padding:8px;margin:8px 0;width:90%;">') if needs_pw else ""
+        mark = " ✅" if current == key else ""
+        return (f'<form method="POST" action="{url_for("interface_set")}" '
+                f'style="background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:18px;'
+                f'min-width:200px;text-align:center;">'
+                f'<input type="hidden" name="interface" value="{key}">'
+                f'<h3 style="margin:0 0 8px;">{escape(title)}{mark}</h3>{pw}'
+                f'<button type="submit" style="padding:8px 18px;border:0;border-radius:8px;'
+                f'background:#205072;color:#fff;cursor:pointer;">دخول</button></form>')
+    flashes = "".join(f'<p style="color:#b91c1c;">{escape(m)}</p>' for m in get_flashed_messages())
+    html = (
+        '<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8">'
+        '<title>تبديل الواجهة</title></head>'
+        '<body style="font-family:Tahoma,Arial,sans-serif;background:#F3F6F8;padding:30px;">'
+        '<h2>🔀 تبديل الواجهة</h2>' + flashes +
+        '<div style="display:flex;gap:16px;flex-wrap:wrap;">'
+        + card("reception", "استقبال", reception_configured)
+        + card("lab", "مختبر", lab_configured)
+        + card("both", "الاثنين معًا", False) +
+        '</div><p><a href="' + url_for("dashboard") + '">↩ رجوع للرئيسية</a></p></body></html>'
+    )
+    return html
 
 
 @app.route("/interface/set", methods=["POST"])
@@ -3635,7 +3689,8 @@ def print_sample_barcodes(visit_id):
     if not visit:
         return "Not found", 404
     rows = db.execute(
-        "SELECT ot.id, ot.barcode, ot.tube_barcode, td.name as test_name, td.sample_type FROM order_tests ot "
+        "SELECT ot.id, ot.barcode, ot.tube_barcode, td.name as test_name, td.short_name as test_short_name, "
+        "td.sample_type FROM order_tests ot "
         "JOIN test_definitions td ON td.id = ot.test_definition_id "
         "JOIN orders o ON o.id = ot.order_id WHERE o.visit_id=?",
         (visit_id,),
@@ -3674,6 +3729,11 @@ def print_sample_barcodes(visit_id):
             "sample_type": stype,
             "barcode": tube_barcode,
             "test_names": [r["test_name"] for r in group_rows],
+            # short_names: نفس الترتيب أعلاه، لكل تحليل اختصاره اليدوي
+            # (test_definitions.short_name) لو موجود، وإلا الاسم الكامل
+            # نفسه (يتكفل القالب بتقصيره تلقائيًا وقت العرض لو ما فيه
+            # اختصار محدد — راجع shortenTestList بالقالب).
+            "short_names": [r["test_short_name"] or r["test_name"] for r in group_rows],
         })
     if next_index > 1:
         db.commit()
@@ -3686,6 +3746,7 @@ def print_sample_barcodes(visit_id):
             "sample_type": r["test_name"],  # ما فيه نوع عينة معروف، فنعرض اسم التحليل نفسه كتوضيح
             "barcode": r["barcode"],
             "test_names": [r["test_name"]],
+            "short_names": [r["test_short_name"] or r["test_name"]],
         })
 
     # باركودات فردية لكل تحليل لحاله — تبقى متوفرة كخيار إضافي (زر منفصل
@@ -3693,15 +3754,63 @@ def print_sample_barcodes(visit_id):
     # عينة لمختبر مُحيل لتحليل واحد فقط)، بدون ما يأثر على السلوك الافتراضي
     # الجديد (باركود واحد لكل أنبوب).
     individual_samples = [
-        {"barcode": r["barcode"], "test_name": r["test_name"], "sample_type": r["sample_type"]}
+        {"barcode": r["barcode"], "test_name": r["test_name"],
+         "test_short_name": r["test_short_name"] or r["test_name"], "sample_type": r["sample_type"]}
         for r in rows
     ]
+
+    # اسم المختبر يطبع دائمًا بالعربي على ملصق الباركود بغض النظر عن لغة
+    # الواجهة الحالية (brand_name المحقون عالميًا بـ inject_globals يتبع
+    # لغة الجلسة session["lang"] وقد تكون إنكليزية) — فني المختبر يحتاج
+    # الاسم العربي دائمًا على الملصق نفسه، فنجيبه هنا مباشرة بمعزل عن اللغة.
+    lab_name_ar = get_setting(db, "app_name_ar", "") or get_setting(db, "app_name", "")
+
+    # تفضيلات طباعة الباركود (عدد النسخ + طريقة عرض أسماء التحاليل) —
+    # محفوظة كإعدادات عامة (نفس أسلوب get_setting/set_setting بكل الملف)
+    # حتى تبقى "ثابتة" بين كل طباعة وطباعة إلى أن يغيّرها المستخدم بنفسه
+    # من الشريط أعلى صفحة الطباعة، بدل ما ترجع لقيمة افتراضية كل مرة.
+    barcode_copies = get_setting(db, "barcode_copies", "1")
+    barcode_test_names_mode = get_setting(db, "barcode_test_names_mode", "full")  # full | short | none
 
     return render_template(
         "front_desk/print_sample_barcodes.html", visit=visit,
         tube_samples=tube_samples, individual_samples=individual_samples,
         samples=individual_samples,  # توافق مع أي نسخة قديمة من القالب لسا تستخدم "samples"
+        lab_name_ar=lab_name_ar,
+        barcode_copies=barcode_copies,
+        barcode_test_names_mode=barcode_test_names_mode,
     )
+
+
+# ============== حفظ تفضيلات طباعة الباركود (عدد النسخ / عرض أسماء التحاليل) ==============
+# يستدعيه شريط الإعدادات أعلى front_desk/print_sample_barcodes.html كل ما
+# غيّر المستخدم عدد النسخ أو طريقة عرض التحاليل — القيم تُحفظ كإعدادات عامة
+# (get_setting/set_setting) فتصير هي الافتراضي لكل طباعة قادمة (لكل
+# المستخدمين/الأجهزة) لحد ما تُغيّر مرة ثانية، بدل ما ترجع لـ1 نسخة/الاسم
+# الكامل تلقائيًا بكل صفحة جديدة.
+@app.route("/api/settings/barcode-print-prefs", methods=["POST"])
+@login_required
+def api_set_barcode_print_prefs():
+    db = get_db()
+    body = request.get_json(silent=True) or request.form
+    updated = {}
+    if "copies" in body:
+        try:
+            n = int(body.get("copies"))
+            if n < 1 or n > 20:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "عدد النسخ يجب أن يكون رقمًا صحيحًا بين 1 و20"}), 400
+        set_setting(db, "barcode_copies", str(n))
+        updated["copies"] = n
+    if "test_names_mode" in body:
+        mode = (body.get("test_names_mode") or "").strip()
+        if mode not in ("full", "short", "none"):
+            return jsonify({"ok": False, "error": "قيمة غير صالحة"}), 400
+        set_setting(db, "barcode_test_names_mode", mode)
+        updated["test_names_mode"] = mode
+    db.commit()
+    return jsonify({"ok": True, **updated})
 
 
 @app.route("/front-desk/visits/<int:visit_id>/print/invoice")
@@ -4041,8 +4150,10 @@ def daily_report():
     report_date = request.args.get("date", date.today().isoformat())
     visits = db.execute(
         "SELECT v.id, v.registration_number, v.examining_doctor, v.expenses, v.examining_doctor_fee, "
+        "rd.full_name as referring_doctor_name, "
         "v.notes, p.full_name, p.gender, p.age FROM visits v "
         "JOIN patients p ON p.id = v.patient_id "
+        "LEFT JOIN doctors rd ON rd.id = v.doctor_id "
         "WHERE substr(v.created_at,1,10)=? ORDER BY v.registration_number",
         (report_date,),
     ).fetchall()
@@ -4050,6 +4161,8 @@ def daily_report():
     rows = []
     grand_total = 0
     grand_expenses = 0
+    grand_general_expenses = 0
+    grand_forwarded_total = 0
     grand_examining_fees = 0
     grand_remaining = 0
     for v in visits:
@@ -4062,7 +4175,7 @@ def daily_report():
         items = db.execute(
             "SELECT td.name, td.code as test_code, td.is_examining_test, "
             "COALESCE(ot.price, td.price) as price, ot.doctor_id, "
-            "ot.fee_waived, ot.hidden_from_log, ot.forwarded_cost FROM order_tests ot "
+            "ot.fee_waived, ot.hidden_from_log, ot.forwarded_cost, ot.forwarded_lab_name FROM order_tests ot "
             "JOIN test_definitions td ON td.id = ot.test_definition_id "
             "JOIN orders o ON o.id = ot.order_id WHERE o.visit_id=?",
             (v["id"],),
@@ -4077,10 +4190,21 @@ def daily_report():
         # (المطلوب 3) -- يُضاف لصرفيات هذي الزيارة بالتقرير اليومي، بنفس
         # طريقة period_breakdown() أعلاه المستخدمة بالتقارير الشهرية/نصف
         # السنوية/السنوية (كانت ناقصة هون فقط بالتقرير اليومي).
+        # الفحوصات المرسلة فعليًا لمختبر آخر + اجورها لهذي الزيارة تحديدًا
+        # (المطلوب: عمود "الفحوصات المرسلة لمختبرات اخرى + اجورها" -- يعرض
+        # اسم كل تحليل مُرسَل + اسم المختبر + كلفته، بدل رقم إجمالي فقط).
+        forwarded_items = [i for i in items if (i["forwarded_cost"] or 0)]
+        forwarded_display = ", ".join(
+            f"{i['name']} → {i['forwarded_lab_name'] or '-'} ({i['forwarded_cost']:.0f})"
+            for i in forwarded_items
+        )
         forwarded_total = sum((i["forwarded_cost"] or 0) for i in items)
-        row_expenses = (v["expenses"] or 0) + forwarded_total
+        general_expenses = v["expenses"] or 0
+        row_expenses = general_expenses + forwarded_total
         row_examining_fee = v["examining_doctor_fee"] or 0
         grand_expenses += row_expenses
+        grand_general_expenses += general_expenses
+        grand_forwarded_total += forwarded_total
         grand_examining_fees += row_examining_fee
         doctor_names = set()
         for i in visible_items:
@@ -4119,11 +4243,16 @@ def daily_report():
         rows.append({
             "reg": v["registration_number"], "name": v["full_name"],
             "gender": v["gender"] or "-", "age": v["age"] if v["age"] is not None else "-",
+            "referring_doctor": v["referring_doctor_name"] or "-",  # الطبيب المرسل
             "tests": test_names, "total": total, "doctors": ", ".join(doctor_names),
             "examining_doctor": examining_doctor_display,
             "expenses": row_expenses + row_examining_fee,  # توافق قديم: أي قالب لسا يستخدم "expenses" وحده يشتغل متل قبل تمامًا
             "expenses_only": row_expenses,
+            "general_expenses": general_expenses,  # الصرفيات العامة لحالها (بدون أجور الفاحص ولا كلفة الإرسال)
             "examining_fee": row_examining_fee,
+            "forwarded_display": forwarded_display,  # الفحوصات المرسلة لمختبرات اخرى + اجورها (تفصيلي)
+            "forwarded_total": forwarded_total,
+            "net": total - (row_expenses + row_examining_fee),  # صافي الوارد الكلي لهذي الزيارة تحديدًا
             "remaining": remaining,
             "notes": v["notes"] or "",
         })
@@ -4132,6 +4261,8 @@ def daily_report():
     return render_template("front_desk/daily_report.html", rows=rows, report_date=report_date,
                             grand_total=grand_total, grand_expenses=grand_total_expenses,
                             grand_expenses_only=grand_expenses, grand_examining_fees=grand_examining_fees,
+                            grand_general_expenses=grand_general_expenses,
+                            grand_forwarded_total=grand_forwarded_total,
                             grand_net=grand_total - grand_total_expenses, grand_remaining=grand_remaining)
 
 
@@ -4197,7 +4328,7 @@ def accounts_hub():
 def _accounts_search_run(db, args):
     """منطق مشترك بين شاشة العرض وكلا رابطي التصدير — حتى نتائج الشاشة
     ونتائج الملف المُصدَّر يطابقان بعض دائمًا (بنفس المعاملات بالضبط)."""
-    search_kind = args.get("kind", "basic")  # basic | doctor
+    search_kind = args.get("kind", "basic")  # basic | doctor | lab | referral
     date_from, date_to = acs.resolve_date_range(args)
     test_ids = [int(x) for x in args.getlist("test_id") if x.strip().isdigit()]
 
@@ -4206,6 +4337,18 @@ def _accounts_search_run(db, args):
         if not doctor_name:
             return search_kind, date_from, date_to, None
         result = acs.run_doctor_search(db, doctor_name, date_from, date_to, test_ids)
+        return search_kind, date_from, date_to, result
+
+    if search_kind == "lab":
+        lab_name = (args.get("lab_name") or "").strip()
+        if not lab_name:
+            return search_kind, date_from, date_to, None
+        result = acs.run_lab_search(db, lab_name, date_from, date_to, test_ids)
+        return search_kind, date_from, date_to, result
+
+    if search_kind == "referral":
+        referring_doctor = (args.get("referring_doctor") or "").strip() or None
+        result = acs.run_referral_search(db, date_from, date_to, test_ids, referring_doctor)
         return search_kind, date_from, date_to, result
 
     mode = args.get("result_mode", "counts")  # counts | names
@@ -4227,6 +4370,8 @@ def accounts_search():
         has_query=has_query,
         test_choices=acs.get_test_choices(db),
         doctor_choices=acs.get_examining_doctor_names(db),
+        lab_choices=acs.get_forwarded_lab_names(db),
+        referring_doctor_choices=acs.get_referring_doctor_names(db),
         selected_test_ids=[int(x) for x in request.args.getlist("test_id") if x.strip().isdigit()],
         request_args=request.args,
     )
@@ -4258,6 +4403,26 @@ def accounts_search_export_xlsx():
             sheet_title = f"{result['doctor_name']}-تفصيلي"
         path = excel_export.export_rows_to_xlsx(columns, rows, sheet_title=sheet_title, totals_row=totals)
         safe_name = re.sub(r"[^\w\-]+", "_", result["doctor_name"])
+        download_name = f"{safe_name}_{date_from}_{date_to}.xlsx"
+    elif kind == "lab":
+        columns = [("patient_name", "اسم المريض"), ("test_name", "التحليل"),
+                   ("date", "التاريخ"), ("cost", "الكلفة")]
+        rows = [dict(r, date=acs.ddmmyyyy(r["date"])) for r in result["rows"]]
+        totals = {"patient_name": "المجموع الكلي", "cost": result["total_cost"]}
+        path = excel_export.export_rows_to_xlsx(columns, rows, sheet_title=f"{result['lab_name']}", totals_row=totals)
+        safe_name = re.sub(r"[^\w\-]+", "_", result["lab_name"])
+        download_name = f"{safe_name}_{date_from}_{date_to}.xlsx"
+    elif kind == "referral":
+        columns = [("source_type_ar", "المصدر"), ("source_name", "الاسم"),
+                   ("patient_count", "عدد المرضى"), ("visit_test_count", "عدد مرات التحليل"),
+                   ("revenue", "المبلغ المُستحصَل")]
+        source_type_ar = {"doctor": "طبيب مُرسِل", "center": "مختبر آخر", "direct": "مباشر"}
+        rows = [dict(r, source_type_ar=source_type_ar[r["source_type"]]) for r in result["rows"]]
+        totals = {"source_type_ar": "الإجمالي", "patient_count": result["total_patient_count"],
+                   "visit_test_count": result["total_visit_test_count"], "revenue": result["total_revenue"]}
+        sheet_title = result["doctor_filter"] or "كل مصادر الإحالة"
+        path = excel_export.export_rows_to_xlsx(columns, rows, sheet_title=sheet_title, totals_row=totals)
+        safe_name = re.sub(r"[^\w\-]+", "_", result["doctor_filter"] or "referral_sources")
         download_name = f"{safe_name}_{date_from}_{date_to}.xlsx"
     else:
         mode = result.get("mode", "counts")
@@ -4307,7 +4472,9 @@ def accounts_search_export_pdf():
         return redirect(url_for("accounts_search", **request.args))
 
     log_action("Export", "accounts_search", 0, f"pdf {kind} {date_from}..{date_to}")
-    name_part = result["doctor_name"] if kind == "doctor" else "accounts_search"
+    name_part = result["doctor_name"] if kind == "doctor" else (
+        result["lab_name"] if kind == "lab" else (
+            (result["doctor_filter"] or "referral_sources") if kind == "referral" else "accounts_search"))
     safe_name = re.sub(r"[^\w\-]+", "_", name_part)
     download_name = f"{safe_name}_{date_from}_{date_to}.pdf"
     return send_file(pdf_path, as_attachment=True, download_name=download_name)
@@ -5353,6 +5520,8 @@ def _print_report_impl(order_test_id):
         "SELECT ot.*, td.code as test_code, td.name as test_name, td.department as test_department, "
         "td.is_examining_test as is_examining_test, td.enable_stamp_widget as enable_stamp_widget, "
         "td.done_by_note as done_by_note, "
+        "td.show_lab_stamp as show_lab_stamp, td.show_doctor_stamp as show_doctor_stamp, "
+        "td.hide_signature_box as hide_signature_box, td.signature_position as signature_position, "
         "p.id as patient_id, p.full_name as patient_name, p.gender, p.age, p.age_unit, "
         "v.id as visit_id, v.created_at as visit_created_at, v.registration_number, "
         "v.doctor_id, v.referral_center_id, v.examining_doctor, "
@@ -5477,7 +5646,17 @@ def _print_report_impl(order_test_id):
     for p in parameters:
         r = results_by_name.get(p["name"])
         if r is not None:
-            value = r["value_text"] if r["value_text"] not in (None, "") else r["value_numeric"]
+            if r["value_text"] not in (None, ""):
+                value = r["value_text"]
+            else:
+                value = r["value_numeric"]
+                # رقم صحيح (مثلاً 33.0) يُعرض بدون ".0" الزائدة -- 33 بدل
+                # 33.0 -- بينما أي رقم فيه كسر فعلي (مثلاً 12.5) يبقى يظهر
+                # بكسره كما هو. يشمل هذا كل نتيجة عددية بأي قالب جاهز يستخدم
+                # params.get(...) مباشرة (blood_film.html وغيره)، بما فيها
+                # أنواع الفلم الدموي (WBC differential).
+                if isinstance(value, float) and value == int(value):
+                    value = int(value)
         else:
             value = None
         params[p["name"]] = "" if value is None else value
@@ -5670,6 +5849,12 @@ def _print_report_impl(order_test_id):
     if bool(ot["enable_stamp_widget"]) if "enable_stamp_widget" in ot.keys() else False:
         if not _stamp_placements:
             _auto_stamps = find_stamps_for_report(db, ot["examining_doctor"] if "examining_doctor" in ot.keys() else "")
+            # خيارات مصمم التقارير: إيقاف ختم المختبر و/أو ختم الدكتور الفاحص
+            # تلقائيًا لهذا التحليل (NULL/1 = الافتراضي القديم، يلصق الاثنين).
+            _show_lab = ot["show_lab_stamp"] is None or bool(ot["show_lab_stamp"])
+            _show_doc = ot["show_doctor_stamp"] is None or bool(ot["show_doctor_stamp"])
+            _auto_stamps = [_s for _s in _auto_stamps
+                            if (_show_lab if _s["is_lab_default"] else _show_doc)]
             _auto_x = 40
             for _s in _auto_stamps:
                 # كل ختم بموضع افتراضي مختلف بالبداية حتى ما ينلصقون فوق
@@ -5692,6 +5877,8 @@ def _print_report_impl(order_test_id):
         previous_values=previous_values, repeat_header_on_print=repeat_header_on_print,
         logo_url=logo_url, from_other_lab=from_other_lab, font_size=font_size,
         show_exam_signature=show_exam_signature,
+        hide_signature_box=bool(ot["hide_signature_box"]),
+        signature_position=(ot["signature_position"] if ot["signature_position"] in ("left", "center", "right") else ""),
         # enable_stamp_widget: يتحكم فقط بصندوق "إضافة ختم / توقيع" التفاعلي
         # (stamp_picker.html) — منفصل تماماً عن show_exam_signature أعلاه
         # (صندوق التوقيع الثابت الخاص بالفحوصات). الافتراضي 0 لأي تحليل ما
@@ -7352,7 +7539,7 @@ def update_test_field(test_id):
     db = get_db()
     field = (request.form.get("field") or "").strip()
     value = (request.form.get("value") or "").strip()
-    allowed_fields = {"code", "name", "department", "sample_type"}
+    allowed_fields = {"code", "name", "short_name", "department", "sample_type"}
     if field not in allowed_fields:
         return {"ok": False, "error": "حقل غير مسموح بتعديله من هنا"}, 400
     row = db.execute("SELECT id FROM test_definitions WHERE id=?", (test_id,)).fetchone()
@@ -7618,6 +7805,7 @@ def test_catalog():
     if request.method == "POST":
         code = request.form.get("code", "").strip()
         name = request.form.get("name", "").strip()
+        short_name = request.form.get("short_name", "").strip()
         department = request.form.get("department", "").strip()
         report_group = request.form.get("report_group", "").strip()
         sample_type = request.form.get("sample_type", "").strip()
@@ -7626,9 +7814,9 @@ def test_catalog():
         params_raw = request.form.get("parameters", "").strip()
 
         cur = db.execute(
-            "INSERT INTO test_definitions (code, name, department, report_group, sample_type, price, is_examining_test) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (code, name, department, report_group, sample_type, price, is_examining_test),
+            "INSERT INTO test_definitions (code, name, short_name, department, report_group, sample_type, price, is_examining_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (code, name, short_name, department, report_group, sample_type, price, is_examining_test),
         )
         test_id = cur.lastrowid
         for chunk in params_raw.split(","):
@@ -7942,6 +8130,16 @@ def app_settings():
         bg_position_raw = request.form.get("dashboard_bg_position", "").strip()
         if bg_position_raw in ("top", "center", "bottom"):
             set_setting(db, "dashboard_bg_position", bg_position_raw)
+        # حجم الصورة: cover / contain / custom (نسبة % من عرض الشاشة، 5..400)
+        bg_size_mode_raw = request.form.get("dashboard_bg_size_mode", "").strip()
+        if bg_size_mode_raw in ("cover", "contain", "custom"):
+            set_setting(db, "dashboard_bg_size_mode", bg_size_mode_raw)
+        bg_size_pct_raw = request.form.get("dashboard_bg_size_percent", "").strip()
+        if bg_size_pct_raw:
+            try:
+                set_setting(db, "dashboard_bg_size_percent", str(max(5, min(400, int(bg_size_pct_raw)))))
+            except ValueError:
+                pass
 
         # ألوان الواجهة العامة (المطلوب: تغيير ألوان الخلفية بكل صفحات
         # البرنامج، مو بس شاشة الترحيب) -- نفس أسلوب باقي إعدادات
@@ -8335,6 +8533,8 @@ def app_settings():
         "landing_image_opacity": get_setting(db, "landing_image_opacity", "100"),
         "dashboard_bg_blur": get_setting(db, "dashboard_bg_blur", "2"),
         "dashboard_bg_position": get_setting(db, "dashboard_bg_position", "center"),
+        "dashboard_bg_size_mode": get_setting(db, "dashboard_bg_size_mode", "cover"),
+        "dashboard_bg_size_percent": get_setting(db, "dashboard_bg_size_percent", "100"),
         "report_row_pad": get_setting(db, "report_row_pad", "5"),
         "patient_info_top_gap": get_setting(db, "patient_info_top_gap", "4"),
         "patient_info_label_width": get_setting(db, "patient_info_label_width", "108"),
@@ -9030,6 +9230,27 @@ def report_designer():
         existing_tpl = get_report_template(db, test_id)
         heading_align = request.form.get("heading_align") or (existing_tpl["heading_align"] if existing_tpl else None) or "center"
         rows_align = request.form.get("rows_align") or (existing_tpl["rows_align"] if existing_tpl else None) or "right"
+
+        if mode == "print_options":
+            # خيارات الختم والتوقيع + عمود كل باراميتر بالتقرير (مصمم التقارير).
+            show_lab_stamp = 1 if request.form.get("show_lab_stamp") else 0
+            show_doctor_stamp = 1 if request.form.get("show_doctor_stamp") else 0
+            hide_signature_box = 1 if request.form.get("hide_signature_box") else 0
+            sig_pos = request.form.get("signature_position", "")
+            sig_pos = sig_pos if sig_pos in ("left", "center", "right") else None
+            db.execute(
+                "UPDATE test_definitions SET show_lab_stamp=?, show_doctor_stamp=?, "
+                "hide_signature_box=?, signature_position=? WHERE id=?",
+                (show_lab_stamp, show_doctor_stamp, hide_signature_box, sig_pos, test_id),
+            )
+            for p in parameters:
+                col = request.form.get(f"report_column_{p['id']}", "")
+                col = col if col in ("1", "2") else None
+                db.execute("UPDATE test_parameters SET report_column=? WHERE id=?", (col, p["id"]))
+            db.commit()
+            log_action("UpdatePrintOptions", "test_definition", int(test_id), "print_options")
+            flash("تم حفظ خيارات الختم والتوقيع وأعمدة الباراميترات.")
+            return redirect(url_for("report_designer", test_definition_id=test_id))
 
         if mode == "stamp":
             # تفعيل/تعطيل صندوق "إضافة ختم / توقيع" التفاعلي لهذا التحليل —

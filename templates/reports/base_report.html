@@ -452,8 +452,8 @@
           {% endif %}
           <div class="signature-area-wrap" data-hidden="{{ '1' if report_layout.hide_signature else '0' }}"
                style="{{ 'display:none;' if report_layout.hide_signature else '' }}">
-            {% if show_exam_signature %}
-            <div class="exam-signature-row">
+            {% if show_exam_signature and not hide_signature_box %}
+            <div class="exam-signature-row"{% if signature_position %} style="justify-content: {{ {'left': 'flex-start', 'center': 'center', 'right': 'flex-end'}[signature_position] }};"{% endif %}>
               <div class="exam-signature-box">
                 <div class="exam-signature-line">&nbsp;</div>
               </div>

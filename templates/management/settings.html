@@ -88,6 +88,19 @@
           <option value="bottom" {{ 'selected' if current.dashboard_bg_position == 'bottom' }}>الأسفل</option>
         </select>
       </div>
+      <div class="form-field">
+        <label>🔎 حجم الصورة بشاشة الترحيب</label>
+        <select name="dashboard_bg_size_mode" id="dashBgSizeMode" onchange="document.getElementById('dashBgSizeCustom').style.display = this.value === 'custom' ? 'block' : 'none';">
+          <option value="cover" {{ 'selected' if current.dashboard_bg_size_mode == 'cover' }}>تملأ الشاشة (قد تُقصّ) — الافتراضي</option>
+          <option value="contain" {{ 'selected' if current.dashboard_bg_size_mode == 'contain' }}>تظهر كاملة بدون قص</option>
+          <option value="custom" {{ 'selected' if current.dashboard_bg_size_mode == 'custom' }}>حجم مخصّص (نسبة من عرض الشاشة)</option>
+        </select>
+        <div id="dashBgSizeCustom" style="margin-top:8px; display:{{ 'block' if current.dashboard_bg_size_mode == 'custom' else 'none' }};">
+          <input type="number" name="dashboard_bg_size_percent" min="5" max="400"
+                 value="{{ current.dashboard_bg_size_percent }}" style="width:120px;"> %
+          <span class="muted">100 = بعرض الشاشة كاملة، 50 = نصف العرض، 200 = ضعف العرض (تكبير). الارتفاع يتبع النسبة تلقائيًا.</span>
+        </div>
+      </div>
     </div>
 
     <div class="form-field">
