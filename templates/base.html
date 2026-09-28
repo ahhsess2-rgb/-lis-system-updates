@@ -104,6 +104,11 @@
       <span>{{ brand_name }}</span>
     </div>
     <nav>
+      {# صلاحية روابط الحسابات: تتبع نفس منطق الباك-إند (roles_required = واجهة مختبر/الاثنين معًا،
+         وجلسة المصمم تتخطى الفحص). كانت تعتمد على current_role فقط، فلما يكون الدور "designer"
+         (أو فاضي) كل روابط الحسابات تختفي رغم إن الصفحات نفسها مسموحة. #}
+      {% set is_designer = session.get('designer_id') %}
+      {% set can_reports = is_designer or session.get('interface') in ('lab', 'both') or current_role in ['admin', 'accountant', 'supervisor'] and session.get('interface') is none %}
       <div class="nav-group">
         <a class="nav-link {{ 'active' if request.path == '/' else '' }}" href="{{ url_for('dashboard') }}">📊 {{ t('dashboard') }}</a>
       </div>
@@ -123,7 +128,7 @@
         <a class="nav-link {{ 'active' if request.path == url_for('results_list') else '' }}" href="{{ url_for('results_list') }}">📄 {{ t('results') }}</a>
         <a class="nav-link {{ 'active' if request.path == url_for('pdf_archive') else '' }}" href="{{ url_for('pdf_archive') }}">🗄️ أرشيف PDF</a>
         <a class="nav-link {{ 'active' if request.path == url_for('followups_list') else '' }}" href="{{ url_for('followups_list') }}">📞 {{ t('patients_followup') }}</a>
-        {% if current_role in ['supervisor', 'admin'] %}
+        {% if can_reports or current_role in ['supervisor', 'admin'] %}
         <a class="nav-link {{ 'active' if request.path == url_for('whatsapp_queue') else '' }}" href="{{ url_for('whatsapp_queue') }}">📱 طابور واتساب</a>
         {% endif %}
         </div>
@@ -141,7 +146,7 @@
         </div>
       </div>
       {% endif %}
-      {% if session.get('interface') in (None, 'reception', 'both') %}
+      {% if session.get('interface') in (None, 'reception', 'both') or can_reports %}
       <div class="nav-group">
         <div class="nav-group-title nav-group-toggle" data-group="billing_center" onclick="lisToggleNavGroup(this)">
           <span>{{ t('billing_center') }}</span><span class="nav-group-arrow">▾</span>
@@ -149,8 +154,8 @@
         <div class="nav-group-links">
         <a class="nav-link {{ 'active' if request.path == url_for('registers') else '' }}" href="{{ url_for('registers') }}">💳 {{ t('registers') }}</a>
         <a class="nav-link {{ 'active' if request.path == url_for('invoices_list') else '' }}" href="{{ url_for('invoices_list') }}">🧮 {{ t('invoices') }}</a>
-        {% if current_role in ['admin', 'accountant', 'supervisor'] %}
         <a class="nav-link {{ 'active' if request.path == url_for('daily_report') else '' }}" href="{{ url_for('daily_report') }}">🗓️ {{ t('daily_report') }}</a>
+        {% if can_reports %}
         <a class="nav-link {{ 'active' if request.path == url_for('monthly_report') else '' }}" href="{{ url_for('monthly_report') }}">📅 {{ t('monthly_report') }}</a>
         <a class="nav-link {{ 'active' if request.path == url_for('quarter_report') else '' }}" href="{{ url_for('quarter_report') }}">📈 التقرير الربع سنوي</a>
         <a class="nav-link {{ 'active' if request.path == url_for('half_year_report') else '' }}" href="{{ url_for('half_year_report') }}">📆 {{ t('half_year_report') }}</a>
@@ -158,7 +163,7 @@
         <a class="nav-link {{ 'active' if request.path == url_for('accounts_hub') else '' }}" href="{{ url_for('accounts_hub') }}">🗂️ كل الحسابات</a>
         <a class="nav-link {{ 'active' if request.path == url_for('accounts_search') else '' }}" href="{{ url_for('accounts_search') }}">🔍 بحث وتصدير الحسابات</a>
         {% endif %}
-        {% if current_role in ['admin', 'accountant'] %}
+        {% if can_reports %}
         <a class="nav-link {{ 'active' if request.path == url_for('rates') else '' }}" href="{{ url_for('rates') }}">💲 {{ t('rates') }}</a>
         {% endif %}
         </div>
