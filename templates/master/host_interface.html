@@ -10,6 +10,9 @@
       <label class="checkbox-item"><input type="checkbox" name="enabled" {% if enabled %}checked{% endif %}> {{ t('enable_listener') }}</label>
     </div>
     <div class="form-field">
+      <label class="checkbox-item"><input type="checkbox" name="auto_send_to_reception" {% if auto_send %}checked{% endif %}> إرسال النتائج المستلمة من الجهاز تلقائيًا إلى الاستقبال للطباعة</label>
+    </div>
+    <div class="form-field">
       <label>{{ t('listen_ip') }}</label>
       <input type="text" name="ip" value="{{ ip }}" placeholder="0.0.0.0">
     </div>
@@ -45,6 +48,8 @@
           {% if l['status'] == 'Processed' %}✅ {{ l['status'] }}
           {% elif l['status'] == 'Error' %}⛔ {{ l['status'] }}
           {% elif l['status'] == 'Unmatched' %}⚠️ {{ l['status'] }}
+          {% elif l['status'] == 'Query' %}🔎 {{ l['status'] }}
+          {% elif l['status'] == 'Sent' %}📤 {{ l['status'] }}
           {% else %}{{ l['status'] }}{% endif %}
         </td>
         <td>{{ l['parsed_summary'] }}</td>

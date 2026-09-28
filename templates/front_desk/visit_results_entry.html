@@ -134,42 +134,58 @@
     e.returnValue = '';
   });
 
+  // ---- طباعة + حفظ تلقائي (متاحة لكل الواجهات: استقبال/مختبر/الاثنين) ----
+  // السيرفر هو اللي يقرر: لو ما تغيّرت أي قيمة بنتيجة مكتملة → يطبع مباشرة بدون
+  // كلمة مرور. لو فيه تعديل فعلي على نتيجة مكتملة/معتمدة → يطلب يوزر/باسورد
+  // مسؤول أو مشرف (نفس الحساب) ثم يحفظ ويطبع. كل حفظ يجدّد ملف PDF بالأرشيف.
+  function lisAskGate() {
+    var u = prompt('تعديل نتيجة مكتملة/معتمدة — اسم مستخدم مسؤول/مشرف المختبر:');
+    if (u === null || u === '') return null;
+    var p = prompt('كلمة مرور نفس الحساب:');
+    if (p === null) return null;
+    return { u: u, p: p };
+  }
+  function lisPostJson(postUrl, form, gate) {
+    var fd = new FormData(form);
+    if (gate) { fd.set('gate_username', gate.u); fd.set('gate_password', gate.p); }
+    return fetch(postUrl, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'fetch' } })
+      .then(function (r) { return r.json(); });
+  }
+  function lisWithShowPrev(url) {
+    var tg = document.getElementById('showPrevToggle');
+    if (!tg) return url;
+    return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'show_prev=' + (tg.checked ? '1' : '0');
+  }
+  function lisRunSaveAndPrint(postUrl, form, getUrl, title) {
+    function attempt(gate) {
+      return lisPostJson(postUrl, form, gate).then(function (data) {
+        if (data.ok) {
+          lisDirty = false;
+          openReportModal(lisWithShowPrev(getUrl(data)), title);
+          return;
+        }
+        if (data.needs_gate) {
+          var g = lisAskGate();
+          if (!g) return;
+          return attempt(g);
+        }
+        alert(data.error || 'تعذّر حفظ/طباعة النتيجة');
+      });
+    }
+    return attempt(null).catch(function (e) { alert('خطأ بالاتصال: ' + e); });
+  }
+  // زر 🖨️ داخل بطاقة تحليل واحد
+  function lisPrintOne(otId) {
+    var form = document.getElementById('visitResultsForm');
+    if (!form) return;
+    lisRunSaveAndPrint('/reports/print-and-save/' + otId, form,
+      function (d) { return d.print_url; }, null);
+  }
+  // أزرار أعلى الصفحة (كل النتائج / اللوحة المجمّعة)
   function lisSaveThenPrint(url, title) {
     var form = document.getElementById('visitResultsForm');
     if (!form) { openReportModal(url, title); return; }
-    var hasProtected = form.querySelectorAll('.badge-Completed, .badge-Verified').length > 0;
-    if (!hasProtected) {
-      // ما فيه نتيجة محمية -- حفظ صامت بالخلفية (بدون تنقّل/إعادة تحميل)
-      // ثم فتح المعاينة مباشرة، نفس السلوك السابق.
-      fetch(window.location.href, { method: 'POST', body: new FormData(form) })
-        .then(function () { lisDirty = false; })
-        .catch(function () { /* صامت — نفتح المعاينة بأي حال أدناه */ })
-        .then(function () { openReportModal(url, title); });
-      return;
-    }
-    // فيه نتيجة مكتملة/معتمدة بهذي الزيارة: نفس بوابة يوزر/باسورد مسؤول/
-    // مشرف المختبر المستخدمة لزر "💾 حفظ" العادي (تحتاج تأكيد تفاعلي، ما
-    // تنعمل بـfetch صامت بالخلفية) -- سابقًا كان هذا الزر يتجاوز الحفظ
-    // كليًا بهذي الحالة ويفتح المعاينة بالقيم القديمة المحفوظة بقاعدة
-    // البيانات فقط، فيطبع بيانات غير محدَّثة. هسه: نطلب نفس بيانات
-    // الدخول، ثم نسوي إرسال حقيقي (requestSubmit) بنفس بيانات الفورم +
-    // حقلي الدخول، فتنحفظ القيم الجديدة فعليًا وتُعاد الصفحة تحميلها، وبعد
-    // إعادة التحميل تنفتح معاينة الطباعة تلقائيًا (راجع السكربت اللي يقرأ
-    // sessionStorage['lisPendingPrint'] تحت).
-    if (!confirm('توجد نتيجة مكتملة أو معتمدة ضمن هذي الزيارة -- تعديلها يحتاج دخول مسؤول/مشرف المختبر حتى لو كنت أدمن.\nسيتم حفظ القيم الحالية أولًا ثم فتح معاينة الطباعة تلقائيًا بعد إعادة تحميل الصفحة. متابعة؟')) return;
-    var username = prompt('اسم مستخدم حساب مسؤول/مشرف المختبر لتأكيد التعديل:');
-    if (username === null) return;
-    var password = prompt('كلمة مرور نفس الحساب:');
-    if (password === null) return;
-    var uInput = document.createElement('input');
-    uInput.type = 'hidden'; uInput.name = 'gate_username'; uInput.value = username;
-    form.appendChild(uInput);
-    var pInput = document.createElement('input');
-    pInput.type = 'hidden'; pInput.name = 'gate_password'; pInput.value = password;
-    form.appendChild(pInput);
-    sessionStorage.setItem('lisPendingPrint', JSON.stringify({ url: url, title: title }));
-    lisDirty = false;
-    if (form.requestSubmit) { form.requestSubmit(); } else { form.submit(); }
+    lisRunSaveAndPrint(window.location.href, form, function () { return url; }, title);
   }
 
   // بعد إعادة تحميل الصفحة (تبع الحفظ المحمي أعلاه)، لو فيه طباعة معلّقة
@@ -334,7 +350,7 @@
         <h4 style="margin:0;">{{ ot['test_name'] }}</h4>
         <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
           <button type="submit" class="btn small" title="حفظ كل نتائج هذه الصفحة (كل التحاليل الظاهرة، مو هذا التحليل بس)">💾 {{ t('save') }}</button>
-          <button type="button" class="btn small secondary" onclick="lisSaveThenPrint('{{ url_for('print_report', order_test_id=ot['id']) }}')" title="طباعة تقرير هذا التحليل فقط (يحفظ القيم المدخلة حالياً تلقائياً قبل الطباعة -- لو النتيجة مكتملة/معتمدة يطلب دخول مسؤول/مشرف أولًا)">🖨️</button>
+          <button type="button" class="btn small secondary" onclick="lisPrintOne({{ ot['id'] }})" title="طباعة تقرير هذا التحليل (يحفظ النتيجة تلقائياً + نسخة PDF بالأرشيف). تعديل نتيجة مكتملة يحتاج مسؤول/مشرف، أما الطباعة بدون تعديل فمتاحة للجميع">🖨️</button>
           <span class="badge badge-{{ ot['status'] }}">{{ ot['status'] }}</span>
         </div>
       </div>
@@ -678,6 +694,7 @@
       if (gateHandled) return;
       var hasProtected = form.querySelectorAll('.badge-Completed, .badge-Verified').length > 0;
       if (!hasProtected) return;
+      if (!lisDirty) return; // ما تغيّر شي بالحقول → ما نطلب كلمة مرور (السيرفر يتحقق أيضاً)
       // لو زر الطباعة (lisSaveThenPrint فوق) هو اللي سوّى requestSubmit
       // بعد ما جمع اسم المستخدم/كلمة المرور مسبقًا وحطّهم كحقول مخفية،
       // ما نطلبهم مرة ثانية هون -- نخلي الإرسال يكمل عادي بنفس القيم.

@@ -13,40 +13,45 @@
     margin-bottom: 24px;
     isolation: isolate;
   }
+  /* طبقتين منفصلتين: ::before = الصورة (ضبابية + سطوع)، ::after = طبقة اللون
+     فوقها (اللون + درجة التعتيم). كلها قابلة للضبط لكل واجهة من:
+     الإدارة ← مظهر الشاشة الرئيسية. */
   .dash-hero::before {
-    /*
-      خلفية شاشة الترحيب: تدرّج ألوان ثابت دائماً كطبقة تعتيم فوق أي صورة
-      يرفعها الأدمن من الإعدادات (dashboard_bg_url) — بهذا الشكل أي صورة
-      (أي حجم/دقة/ألوان) تنعرض دائماً بنفس "المزاج" اللي ينسجم مع تصميم
-      البرنامج: نفس التعتيم، نفس التمويه، نفس القص (cover) — بدون ما نحتاج
-      نعالج كل صورة يدويًا. إذا ما فيه صورة مرفوعة (dashboard_bg_url فاضي)
-      يبقى التدرّج اللوني وحده وتشتغل الشاشة زينة برضو.
-      درجة التعتيم (dashboard_bg_overlay_opacity) ومقدار الضبابية
-      (dashboard_bg_blur) صارا قابلين للتحكم الكامل من صفحة الإعدادات
-      بدل قيمتين ثابتتين بالكود -- راجع بطاقة "خلفية شاشة الترحيب".
-    */
     content: "";
     position: absolute;
     inset: 0;
     background:
-      linear-gradient(rgba(10, 16, 28, {{ (dashboard_bg_overlay_opacity|default(62)|int) / 100 }}), rgba(10, 16, 28, {{ (dashboard_bg_overlay_opacity|default(62)|int) / 100 }}))
-      {%- if dashboard_bg_url %}, url("{{ dashboard_bg_url }}") {{ dashboard_bg_position }} / {{ dashboard_bg_size_css|default("cover") }} no-repeat{% endif %},
+      {%- if dashboard_bg_url %}
+      url("{{ dashboard_bg_url }}") {{ dashboard_bg_position }} / {{ dashboard_bg_size_css|default("cover") }} no-repeat,
+      {%- endif %}
       linear-gradient(135deg, #0f172a 0%, #1e293b 55%, #0f172a 100%);
-    filter: blur({{ dashboard_bg_blur|default(2) }}px);
+    filter: blur({{ dashboard_bg_blur|default(2) }}px) brightness({{ dashboard_bg_brightness|default(100) }}%);
     transform: scale(1.03); /* يمنع ظهور حواف الـ blur */
+    z-index: 0;
+  }
+  .dash-hero::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: rgba({{ dashboard_overlay_rgb|default('10,16,28') }}, {{ (dashboard_bg_overlay_opacity|default(62)|int) / 100 }});
     z-index: 0;
   }
   html.dark .dash-hero::before {
     background:
-      linear-gradient(rgba(2, 6, 14, {{ (((dashboard_bg_overlay_opacity|default(62)|int) / 100) + 0.10) if ((dashboard_bg_overlay_opacity|default(62)|int) / 100) + 0.10 <= 1 else 1 }}), rgba(2, 6, 14, {{ (((dashboard_bg_overlay_opacity|default(62)|int) / 100) + 0.10) if ((dashboard_bg_overlay_opacity|default(62)|int) / 100) + 0.10 <= 1 else 1 }}))
-      {%- if dashboard_bg_url %}, url("{{ dashboard_bg_url }}") {{ dashboard_bg_position }} / {{ dashboard_bg_size_css|default("cover") }} no-repeat{% endif %},
+      {%- if dashboard_bg_url %}
+      url("{{ dashboard_bg_url }}") {{ dashboard_bg_position }} / {{ dashboard_bg_size_css|default("cover") }} no-repeat,
+      {%- endif %}
       linear-gradient(135deg, #0b1220 0%, #131c2e 55%, #0b1220 100%);
+  }
+  html.dark .dash-hero::after {
+    background: rgba({{ dashboard_overlay_rgb|default('10,16,28') }}, {{ (((dashboard_bg_overlay_opacity|default(62)|int) / 100) + 0.10) if ((dashboard_bg_overlay_opacity|default(62)|int) / 100) + 0.10 <= 1 else 1 }});
   }
   .dash-hero-content {
     position: relative;
     z-index: 1;
     text-align: center;
-    color: #f8fafc;
+    color: {{ dashboard_hero_text_color|default('#f8fafc') }};
+    text-shadow: 0 1px 6px rgba(0,0,0,.25);
     padding: 40px 20px;
   }
   .dash-welcome {

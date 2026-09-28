@@ -778,6 +778,22 @@ _CONCLUSION_MARKER_PATTERN = re.compile(
     "|".join(re.escape(m) for m in CONCLUSION_MARKER_DEFAULT_COLORS)
 )
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+DASH_INTERFACES = ("reception", "lab", "both")
+DASH_INTERFACE_LABELS = {"reception": "الاستقبال", "lab": "المختبر", "both": "الاثنين معًا"}
+DASH_LOOK_KEYS = ("dashboard_bg_path", "dashboard_bg_overlay_opacity", "dashboard_bg_blur",
+                  "dashboard_bg_position", "dashboard_bg_size_mode", "dashboard_bg_size_percent",
+                  "theme_primary_color", "theme_page_bg_color",
+                  "dashboard_overlay_color", "dashboard_bg_brightness", "dashboard_hero_text_color")
+DASH_LOOK_DEFAULTS = {"dashboard_overlay_color": "#0a101c", "dashboard_bg_brightness": "100",
+                      "dashboard_hero_text_color": "#f8fafc"}
+
+
+def _hex_to_rgb_str(h, fallback="10,16,28"):
+    try:
+        h = h.lstrip("#")
+        return f"{int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)}"
+    except Exception:
+        return fallback
 
 
 def get_conclusion_marker_colors(db):
@@ -914,6 +930,38 @@ def _check_completed_result_gate(db, form):
     if hash_password(entered_password) != stored_hash:
         return False, "كلمة مرور الحماية غير صحيحة -- التعديل مرفوض."
     return True, None
+
+
+def _ot_has_result_changes(db, ot, parameters, form, field_prefix=""):
+    """يرجّع True فقط لو القيم المُرسَلة بالفورم تختلف فعلاً عن المحفوظ بقاعدة
+    البيانات (قيمة جديدة أو مختلفة أو تغيير جهاز). يُستخدم حتى لا تُطلب كلمة
+    مرور المسؤول لمجرد الطباعة: طباعة نتيجة مكتملة بدون أي تعديل = مسموحة
+    لأي موظف، وكلمة المرور تُطلب فقط لو فيه تعديل حقيقي على نتيجة مكتملة."""
+    analyzer_field = f"{field_prefix}analyzer"
+    if analyzer_field in form:
+        new_an = (form.get(analyzer_field, "") or "").strip() or None
+        old_an = (ot["analyzer"] if "analyzer" in ot.keys() else None) or None
+        if new_an != old_an:
+            return True
+    for param in parameters:
+        value = (form.get(f"{field_prefix}param_{param['id']}", "") or "").strip()
+        if value == "":
+            continue
+        existing = db.execute(
+            "SELECT value_numeric, value_text FROM results WHERE order_test_id=? AND test_parameter_id=?",
+            (ot["id"], param["id"]),
+        ).fetchone()
+        if not existing:
+            return True
+        new_num, new_txt = None, value
+        if param["result_type"] == "Numeric":
+            try:
+                new_num, new_txt = float(value), None
+            except ValueError:
+                pass
+        if existing["value_numeric"] != new_num or existing["value_text"] != new_txt:
+            return True
+    return False
 
 
 def get_visit_hct(db, visit_id):
@@ -1095,6 +1143,53 @@ def inject_globals():
     # لحاله أول.
     theme_primary_color = get_setting(db, "theme_primary_color", "#205072")
     theme_page_bg_color = get_setting(db, "theme_page_bg_color", "#F3F6F8")
+    # إعدادات مظهر شاشة الترحيب/الألوان الخاصة بكل واجهة (استقبال/مختبر/الاثنين):
+    # لو الواجهة الحالية لها قيمة محفوظة بمفتاح "<المفتاح>__<الواجهة>" تُستخدم بدل
+    # العامة، وغير هيك تبقى القيمة العامة كما هي (فما ينكسر شي عند من ما ضبط شي).
+    dashboard_overlay_color = get_setting(db, "dashboard_overlay_color", DASH_LOOK_DEFAULTS["dashboard_overlay_color"])
+    dashboard_bg_brightness = get_setting(db, "dashboard_bg_brightness", DASH_LOOK_DEFAULTS["dashboard_bg_brightness"])
+    dashboard_hero_text_color = get_setting(db, "dashboard_hero_text_color", DASH_LOOK_DEFAULTS["dashboard_hero_text_color"])
+    _iface = session.get("interface")
+    if _iface in DASH_INTERFACES:
+        def _ov(key):
+            v = get_setting(db, f"{key}__{_iface}", "")
+            return v if v != "" else None
+        _v = _ov("dashboard_bg_path")
+        if _v is not None:
+            dashboard_bg_url = None if _v == "-" else url_for("static", filename=_v)
+        _v = _ov("dashboard_bg_overlay_opacity")
+        if _v is not None:
+            dashboard_bg_overlay_opacity = _v
+        _v = _ov("dashboard_bg_blur")
+        if _v is not None:
+            dashboard_bg_blur = _v
+        _v = _ov("dashboard_bg_position")
+        if _v in ("top", "center", "bottom"):
+            dashboard_bg_position = _v
+        _mode = _ov("dashboard_bg_size_mode")
+        if _mode in ("cover", "contain", "custom"):
+            if _mode == "custom":
+                try:
+                    dashboard_bg_size_css = f"{max(5, min(400, int(_ov('dashboard_bg_size_percent') or 100)))}% auto"
+                except ValueError:
+                    dashboard_bg_size_css = "cover"
+            else:
+                dashboard_bg_size_css = _mode
+        _v = _ov("dashboard_overlay_color")
+        if _v and _HEX_COLOR_RE.match(_v):
+            dashboard_overlay_color = _v
+        _v = _ov("dashboard_hero_text_color")
+        if _v and _HEX_COLOR_RE.match(_v):
+            dashboard_hero_text_color = _v
+        _v = _ov("dashboard_bg_brightness")
+        if _v is not None:
+            dashboard_bg_brightness = _v
+        _v = _ov("theme_primary_color")
+        if _v and _HEX_COLOR_RE.match(_v):
+            theme_primary_color = _v
+        _v = _ov("theme_page_bg_color")
+        if _v and _HEX_COLOR_RE.match(_v):
+            theme_page_bg_color = _v
     license_banner = None
     if "user_id" in session:
         lic = license_manager.check_license(db)
@@ -1112,6 +1207,9 @@ def inject_globals():
                 dashboard_bg_blur=dashboard_bg_blur,
                 dashboard_bg_position=dashboard_bg_position,
                 dashboard_bg_size_css=dashboard_bg_size_css,
+                dashboard_overlay_rgb=_hex_to_rgb_str(dashboard_overlay_color),
+                dashboard_bg_brightness=dashboard_bg_brightness,
+                dashboard_hero_text_color=dashboard_hero_text_color,
                 lab_address=lab_address, lab_phone=lab_phone,
                 report_row_pad=report_row_pad, report_col_pad=report_col_pad,
                 patient_info_top_gap=patient_info_top_gap,
@@ -4997,7 +5095,7 @@ def result_entry(order_test_id):
     ).fetchall()
 
     if request.method == "POST":
-        if ot["status"] in ("Completed", "Verified"):
+        if ot["status"] in ("Completed", "Verified") and _ot_has_result_changes(db, ot, parameters, request.form):
             ok, err = _check_completed_result_gate(db, request.form)
             if not ok:
                 flash(err)
@@ -5011,6 +5109,7 @@ def result_entry(order_test_id):
         if ot["status"] != "Verified":
             db.execute("UPDATE order_tests SET status='Completed' WHERE id=?", (order_test_id,))
         db.commit()
+        _archive_single_test_pdf(db, order_test_id)
         _maybe_auto_whatsapp_send(db, ot["visit_id"])
         _maybe_archive_visit_pdf(db, ot["visit_id"])
         log_action("EnterResult", "order_test", order_test_id, f"gate_person={gate_person}" if gate_person else None)
@@ -5129,14 +5228,31 @@ def visit_results_entry(visit_id):
         # الطلب بدل كل تحليل لحاله -- إذا أي تحليل بهذي الزيارة مكتمل أصلاً،
         # نطلب كلمة المرور مرة وحدة قبل ما نحفظ أي شي من الدفعة كاملة
         # (all-or-nothing، أبسط وأأمن من فحص جزئي لكل بطاقة على حدة).
-        if any(ot["status"] in ("Completed", "Verified") for ot in order_tests):
+        # تعديل: كلمة المرور تُطلب فقط لو الإرسال يغيّر فعلاً قيمة نتيجة
+        # مكتملة/معتمدة. الطباعة (أو حفظ بدون أي تغيير) لا تحتاج مسؤول.
+        unchanged_done_ids = set()
+        needs_gate = False
+        for ot in order_tests:
+            if ot["status"] in ("Completed", "Verified"):
+                _params = get_ordered_parameters(db, ot)
+                if _ot_has_result_changes(db, ot, _params, request.form, f"ot{ot['id']}_"):
+                    needs_gate = True
+                else:
+                    unchanged_done_ids.add(ot["id"])
+        wants_json = request.headers.get("X-Requested-With") == "fetch"
+        if needs_gate:
             ok, err = _check_completed_result_gate(db, request.form)
             if not ok:
+                if wants_json:
+                    return jsonify({"ok": False, "needs_gate": True, "error": err}), 403
                 flash(err)
                 return redirect(url_for("visit_results_entry", visit_id=visit_id))
         gate_person = (request.form.get("gate_person_name") or "").strip()
         any_saved = False
+        touched_ot_ids = []
         for ot in order_tests:
+            if ot["id"] in unchanged_done_ids:
+                continue  # نتيجة مكتملة بدون تغيير: لا نعيد كتابتها (يبقى سجل من أدخلها كما هو)
             # التحاليل المعتمدة (Verified) صارت قابلة للتعديل دائمًا هيه
             # بعد، وتبقى معتمَدة بعد الحفظ (ما تحتاج فتح/إلغاء اعتماد أولًا)
             # — كل تعديل يبقى مسجّل بجدول result_history (القيمة القديمة +
@@ -5148,16 +5264,22 @@ def visit_results_entry(visit_id):
             )
             if touched:
                 any_saved = True
+                touched_ot_ids.append(ot["id"])
                 if ot["status"] != "Verified":
                     db.execute("UPDATE order_tests SET status='Completed' WHERE id=?", (ot["id"],))
         db.commit()
         if any_saved:
+            for _tid in touched_ot_ids:
+                _archive_single_test_pdf(db, _tid)
             _maybe_auto_whatsapp_send(db, visit_id)
             _maybe_archive_visit_pdf(db, visit_id)
             log_action("EnterResultsBulk", "visit", visit_id, f"gate_person={gate_person}" if gate_person else None)
-            flash("تم حفظ النتائج.")
-        else:
+            if not wants_json:
+                flash("تم حفظ النتائج.")
+        elif not wants_json:
             flash("لم تُدخل أي قيمة جديدة.")
+        if wants_json:
+            return jsonify({"ok": True, "saved": any_saved})
         return redirect(url_for("visit_results_entry", visit_id=visit_id))
 
     boxes = []
@@ -6467,6 +6589,124 @@ def _maybe_archive_visit_pdf(db, visit_id):
     return True
 
 
+def _archive_single_test_pdf(db, order_test_id):
+    """يحفظ/يستبدل نسخة PDF دائمة لنتيجة تحليل واحد بمجلد الأرشيف (نفس المجلد
+    اللي يضبطه المدير من الإعدادات). تُستدعى عند كل حفظ نتيجة، فلما مسؤول
+    المختبر يعدّل نتيجة مكتملة (بعد كلمة المرور) الملف يتجدد تلقائيًا بالقيم
+    الجديدة. لا تعلّم النتيجة كـ\"مطبوعة\" (تعيد printed_at لقيمته السابقة).
+    أي فشل لا يوقف الحفظ أبدًا. ترجع مسار الملف أو None."""
+    archive_dir = _get_pdf_archive_dir(db)
+    if not archive_dir:
+        return None
+    row = db.execute(
+        "SELECT ot.status, ot.printed_at, td.code as test_code, td.name as test_name, "
+        "v.registration_number, v.created_at, p.full_name "
+        "FROM order_tests ot JOIN test_definitions td ON td.id = ot.test_definition_id "
+        "JOIN orders o ON o.id = ot.order_id JOIN visits v ON v.id = o.visit_id "
+        "JOIN patients p ON p.id = v.patient_id WHERE ot.id=?", (order_test_id,),
+    ).fetchone()
+    if not row or row["status"] not in ("Completed", "Verified"):
+        return None
+    prev_printed_at = row["printed_at"]
+    try:
+        import re as _re
+        import pdf_export
+        html_content = print_report(order_test_id)
+        if not isinstance(html_content, str):
+            return None
+        def _clean(x):
+            return _re.sub(r'[\\/:*?"<>|\s]+', "_", (x or "").strip()).strip("_") or "x"
+        try:
+            date_part = datetime.fromisoformat(row["created_at"]).strftime("%Y-%m-%d")
+        except (TypeError, ValueError):
+            date_part = datetime.now().strftime("%Y-%m-%d")
+        filename = f"{row['registration_number']}_{_clean(row['full_name'])}_{_clean(row['test_code'] or row['test_name'])}_{date_part}.pdf"
+        pdf_path = os.path.join(archive_dir, filename)
+        pdf_export.html_to_pdf(html_content, request.url_root, pdf_path)
+        return pdf_path
+    except Exception:
+        return None
+    finally:
+        # print_report يثبّت printed_at أول مرة يُفتح فيها؛ الأرشفة ما تُعتبر طباعة
+        try:
+            db.execute("UPDATE order_tests SET printed_at=? WHERE id=?", (prev_printed_at, order_test_id))
+            db.commit()
+        except Exception:
+            pass
+
+
+@app.route("/reports/print-and-save/<int:order_test_id>", methods=["POST"])
+@login_required
+def print_and_save_result(order_test_id):
+    """زر الطباعة بشاشة إدخال النتائج (أي واجهة: استقبال/مختبر/الاثنين):
+    1) يحفظ قيم هذا التحليل المُدخلة حاليًا (ويعلّمه Completed) لو كان جديد،
+    2) يحفظ نسخة PDF بمجلد الأرشيف، 3) يرجّع رابط الطباعة.
+    نتيجة مكتملة بدون تعديل تُطبع مباشرة بدون كلمة مرور؛ لو فيه تعديل فعلي
+    على نتيجة مكتملة يُطلب يوزر/باسورد مسؤول أو مشرف (needs_gate)."""
+    db = get_db()
+    base_sql = (
+        "SELECT ot.*, td.name as test_name, td.code as test_code, "
+        "p.id as patient_id, p.gender as gender, p.age as age, p.age_unit as age_unit, "
+        "v.id as visit_id FROM order_tests ot "
+        "JOIN test_definitions td ON td.id = ot.test_definition_id "
+        "JOIN orders o ON o.id = ot.order_id JOIN visits v ON v.id = o.visit_id "
+        "JOIN patients p ON p.id = v.patient_id WHERE "
+    )
+    ot = db.execute(base_sql + "ot.id=?", (order_test_id,)).fetchone()
+    if not ot:
+        return jsonify({"ok": False, "error": "التحليل غير موجود."}), 404
+    targets = [ot]
+    if ot["test_code"] in BF_RETIC_LINK:
+        sib = db.execute(
+            base_sql + "ot.order_id=? AND td.code=?", (ot["order_id"], BF_RETIC_LINK[ot["test_code"]])
+        ).fetchone()
+        if sib:
+            targets.append(sib)
+
+    done = ("Completed", "Verified")
+    plan = []
+    needs_gate = False
+    for t in targets:
+        params = get_ordered_parameters(db, t)
+        prefix = f"ot{t['id']}_"
+        changed = _ot_has_result_changes(db, t, params, request.form, prefix)
+        if t["status"] in done and changed:
+            needs_gate = True
+        plan.append((t, params, prefix, changed))
+    if needs_gate:
+        ok, err = _check_completed_result_gate(db, request.form)
+        if not ok:
+            return jsonify({"ok": False, "needs_gate": True, "error": err}), 403
+
+    saved_any = False
+    for t, params, prefix, changed in plan:
+        if t["status"] in done and not changed:
+            continue
+        if save_order_test_results(db, t, params, request.form, session["user_id"],
+                                   field_prefix=prefix, patient_id=t["patient_id"]):
+            saved_any = True
+    for t, _p, _pre, _c in plan:
+        has_res = db.execute("SELECT COUNT(*) c FROM results WHERE order_test_id=?", (t["id"],)).fetchone()["c"]
+        if has_res and t["status"] not in done:
+            db.execute("UPDATE order_tests SET status='Completed' WHERE id=?", (t["id"],))
+    db.commit()
+
+    if not db.execute("SELECT COUNT(*) c FROM results WHERE order_test_id=?", (order_test_id,)).fetchone()["c"]:
+        return jsonify({"ok": False, "error": "لا توجد نتيجة مُدخلة لهذا التحليل — أدخل قيمة واحدة على الأقل قبل الطباعة."}), 400
+
+    archived = False
+    for t, _p, _pre, _c in plan:
+        if _archive_single_test_pdf(db, t["id"]):
+            archived = archived or t["id"] == order_test_id
+    if saved_any:
+        _maybe_auto_whatsapp_send(db, ot["visit_id"])
+        _maybe_archive_visit_pdf(db, ot["visit_id"])
+    log_action("PrintAndSaveResult", "order_test", order_test_id,
+               f"saved={int(saved_any)} archived={int(archived)}")
+    return jsonify({"ok": True, "saved": saved_any, "archived": archived,
+                    "print_url": url_for("print_report", order_test_id=order_test_id)})
+
+
 def _whatsapp_generate_and_queue_multi(db, visit_row, patient_id, patient_name, phone, items):
     """نفس _whatsapp_generate_and_queue فوق، بس لعدة تحاليل كملفات PDF
     منفصلة دفعة وحدة (بدل ملف مجمّع واحد) — items: قائمة عناصر بشكل
@@ -7204,6 +7444,7 @@ def host_interface():
         set_setting(db, "host_listener_enabled", enabled)
         set_setting(db, "host_listener_ip", ip)
         set_setting(db, "host_listener_port", port)
+        set_setting(db, "host_auto_send_to_reception", "1" if request.form.get("auto_send_to_reception") else "0")
         db.commit()
         flash(t(session.get("lang", "en"), "host_settings_saved"))
         return redirect(url_for("host_interface"))
@@ -7211,10 +7452,12 @@ def host_interface():
     enabled = get_setting(db, "host_listener_enabled", "0") == "1"
     ip = get_setting(db, "host_listener_ip", "0.0.0.0")
     port = get_setting(db, "host_listener_port", "5000")
+    auto_send = get_setting(db, "host_auto_send_to_reception", "0") == "1"
     logs = db.execute(
         "SELECT * FROM host_interface_log ORDER BY id DESC LIMIT 100"
     ).fetchall()
-    return render_template("master/host_interface.html", enabled=enabled, ip=ip, port=port, logs=logs)
+    return render_template("master/host_interface.html", enabled=enabled, ip=ip, port=port, logs=logs,
+                           auto_send=auto_send)
 
 
 @app.route("/master/host-interface/clear-log", methods=["POST"])
@@ -8046,6 +8289,115 @@ def api_tests_active_list():
 
 
 # --------------------------------------------------------------- management
+@app.route("/management/dashboard-look", methods=["GET", "POST"])
+@roles_required("admin")
+def dashboard_look():
+    """مظهر الشاشة الرئيسية لكل واجهة على حدة (استقبال / مختبر / الاثنين معًا):
+    صورة الخلفية، التعتيم، الضبابية، الموضع، الحجم، ولون الواجهة وخلفية الصفحات.
+    أي حقل يُترك بدون قيمة لواجهة معيّنة يرث الإعداد العام من صفحة الإعدادات."""
+    db = get_db()
+    if request.method == "POST":
+        iface = request.form.get("iface", "")
+        if iface not in DASH_INTERFACES:
+            flash("واجهة غير صالحة.")
+            return redirect(url_for("dashboard_look"))
+        def key(k):
+            return f"{k}__{iface}"
+
+        if request.form.get("action") == "reset":
+            old_path = get_setting(db, key("dashboard_bg_path"), "")
+            if old_path and old_path != "-":
+                full = os.path.join(UPLOAD_DIR, os.path.basename(old_path))
+                if os.path.exists(full):
+                    os.remove(full)
+            for k in DASH_LOOK_KEYS:
+                set_setting(db, key(k), "")
+            db.commit()
+            flash(f"تمت إعادة واجهة {DASH_INTERFACE_LABELS[iface]} للإعدادات العامة.")
+            return redirect(url_for("dashboard_look", tab=iface))
+
+        # صورة الخلفية: رفع جديد / بدون صورة / وراثة العام
+        img_mode = request.form.get("bg_mode", "keep")
+        if img_mode == "inherit":
+            old_path = get_setting(db, key("dashboard_bg_path"), "")
+            if old_path and old_path != "-":
+                full = os.path.join(UPLOAD_DIR, os.path.basename(old_path))
+                if os.path.exists(full):
+                    os.remove(full)
+            set_setting(db, key("dashboard_bg_path"), "")
+        elif img_mode == "none":
+            set_setting(db, key("dashboard_bg_path"), "-")
+        bg_file = request.files.get("bg_file")
+        if bg_file and bg_file.filename:
+            ext = bg_file.filename.rsplit(".", 1)[-1].lower() if "." in bg_file.filename else ""
+            if ext in ALLOWED_DASHBOARD_BG_EXT:
+                for old_ext in ALLOWED_DASHBOARD_BG_EXT:
+                    old_f = os.path.join(UPLOAD_DIR, f"dashboard-bg-{iface}.{old_ext}")
+                    if os.path.exists(old_f):
+                        os.remove(old_f)
+                fname = secure_filename(f"dashboard-bg-{iface}.{ext}")
+                bg_file.save(os.path.join(UPLOAD_DIR, fname))
+                set_setting(db, key("dashboard_bg_path"), f"uploads/{fname}")
+            else:
+                flash("صيغة الصورة غير مدعومة. استخدم PNG أو JPG أو WEBP.")
+
+        def save_int(field, lo, hi):
+            raw = request.form.get(field, "").strip()
+            if raw == "":
+                return
+            try:
+                set_setting(db, key(field), str(max(lo, min(hi, int(raw)))))
+            except ValueError:
+                pass
+        save_int("dashboard_bg_overlay_opacity", 0, 100)
+        save_int("dashboard_bg_blur", 0, 20)
+        save_int("dashboard_bg_size_percent", 5, 400)
+        save_int("dashboard_bg_brightness", 20, 200)
+        pos = request.form.get("dashboard_bg_position", "")
+        if pos in ("top", "center", "bottom"):
+            set_setting(db, key("dashboard_bg_position"), pos)
+        mode = request.form.get("dashboard_bg_size_mode", "")
+        if mode in ("cover", "contain", "custom"):
+            set_setting(db, key("dashboard_bg_size_mode"), mode)
+        for cf in ("theme_primary_color", "theme_page_bg_color",
+                   "dashboard_overlay_color", "dashboard_hero_text_color"):
+            v = request.form.get(cf, "").strip()
+            if request.form.get(cf + "_inherit") == "1":
+                set_setting(db, key(cf), "")
+            elif v and _HEX_COLOR_RE.match(v):
+                set_setting(db, key(cf), v)
+        db.commit()
+        flash(f"تم حفظ مظهر واجهة {DASH_INTERFACE_LABELS[iface]}.")
+        return redirect(url_for("dashboard_look", tab=iface))
+
+    glob = {
+        "dashboard_bg_path": get_setting(db, "dashboard_bg_path", ""),
+        "dashboard_bg_overlay_opacity": get_setting(db, "dashboard_bg_overlay_opacity", "62"),
+        "dashboard_bg_blur": get_setting(db, "dashboard_bg_blur", "2"),
+        "dashboard_bg_position": get_setting(db, "dashboard_bg_position", "center"),
+        "dashboard_bg_size_mode": get_setting(db, "dashboard_bg_size_mode", "cover"),
+        "dashboard_bg_size_percent": get_setting(db, "dashboard_bg_size_percent", "100"),
+        "theme_primary_color": get_setting(db, "theme_primary_color", "#205072"),
+        "theme_page_bg_color": get_setting(db, "theme_page_bg_color", "#F3F6F8"),
+        "dashboard_overlay_color": get_setting(db, "dashboard_overlay_color", DASH_LOOK_DEFAULTS["dashboard_overlay_color"]),
+        "dashboard_bg_brightness": get_setting(db, "dashboard_bg_brightness", DASH_LOOK_DEFAULTS["dashboard_bg_brightness"]),
+        "dashboard_hero_text_color": get_setting(db, "dashboard_hero_text_color", DASH_LOOK_DEFAULTS["dashboard_hero_text_color"]),
+    }
+    cards = []
+    for iface in DASH_INTERFACES:
+        own = {k: get_setting(db, f"{k}__{iface}", "") for k in DASH_LOOK_KEYS}
+        eff = {k: (own[k] if own[k] != "" else glob[k]) for k in DASH_LOOK_KEYS}
+        bg = eff["dashboard_bg_path"]
+        cards.append({
+            "iface": iface, "label": DASH_INTERFACE_LABELS[iface], "own": own, "eff": eff,
+            "bg_url": (url_for("static", filename=bg) if bg and bg != "-" else None),
+            "bg_state": ("none" if own["dashboard_bg_path"] == "-" else
+                         "own" if own["dashboard_bg_path"] else "inherit"),
+        })
+    return render_template("management/dashboard_look.html", cards=cards,
+                           active_tab=request.args.get("tab", "reception"))
+
+
 @app.route("/management/settings", methods=["GET", "POST"])
 @roles_required("admin")
 def app_settings():
@@ -9683,4 +10035,4 @@ if __name__ == "__main__":
     # (settings.auto_update_enabled = 1). راجع auto_updater.py.
     threading.Thread(target=auto_updater.background_loop, args=(get_db,), daemon=True).start()
 
-    app.run(host="0.0.0.0", port=9090, debug=True, threaded=True)
+    app.run(host="0.0.0.0", port=9090, debug=False, threaded=True)
