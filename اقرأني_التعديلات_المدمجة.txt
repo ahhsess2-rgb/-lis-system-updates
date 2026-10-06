@@ -1,0 +1,11 @@
+تعديلات مدمجة فوق lis_merged_v18:
+
+1) app.py
+   - enforce_interface_scope: صفحتا patient_history و print_visit_full_report مفتوحتان لكل الواجهات
+   - api_dashboard_search: حقول referring_doctor / last_visit_date / pending_count
+   - patient_history: الطبيب المرسل + حالة التحليل + can_edit_results
+2) templates/dashboard.html: بحث المريض (Enter + زر البحث + أسهم الكيبورد)
+3) templates/front_desk/patient_history.html: جدول ملخص الزيارات (الأحدث أولاً)
+   ملاحظة: هذا الملف لم يكن موجوداً بزيب v18، فتأكد ما عندك نسخة أحدث بمشروعك الأصلي.
+4) templates/front_desk/new_visit.html: حقول بسطر واحد + Enter للتنقل + BMI
+   (محتفظ بتعديلات v18: رقم العينة، عدد الزيارات السابقة المرفقة)

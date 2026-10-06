@@ -200,6 +200,107 @@
   </form>
 </div>
 
+<div class="card" id="portalCard">
+  <h3>📱 بوابة النتائج (QR للمريض)</h3>
+  <p class="muted">
+    يُطبع QR خاص لكل مريض (غير باركود القناني). المريض يمسحه بموبايله فتظهر "قيد التحضير + الوقت المتوقع"، وتظهر
+    النتائج تلقائيًا بعد اكتمال التحاليل. البرنامج يرسل للبوابة بالخلفية (يلزم إنترنت بجهاز المختبر)، وإذا انقطع
+    الإنترنت يعيد المحاولة تلقائيًا ولا تضيع نتيجة.
+  </p>
+  <div id="portalLocalHelp" class="muted" style="background:#F0F9FF;border:1px solid #BAE6FD;border-radius:8px;padding:10px 12px;margin-bottom:10px;line-height:1.9;">
+    <b>تشغيل البوابة المدمجة (مرة وحدة):</b><br>
+    1) البرنامج يشغّل بوابة صغيرة على المنفذ <b dir="ltr">9091</b> (محلية فقط، فيها صفحة النتيجة وملف PDF لا غير).<br>
+    2) لازم رابط https عام يشير لها. الأسهل مجانًا: ثبّت <b>Tailscale</b> على جهاز المختبر، ثم افتح CMD واكتب:
+    <code dir="ltr">tailscale funnel --bg 9091</code> فيعطيك رابطًا ثابتًا مثل <span dir="ltr">https://lab-pc.xxxx.ts.net</span>. الصقه بالحقل أدناه.<br>
+    3) اضغط حفظ ثم 🔌 اختبار الاتصال. جهاز المختبر لازم يبقى شغّال ومتصل بالإنترنت حتى يفتح المريض الرابط.
+  </div>
+  <form method="POST">
+    <input type="hidden" name="portal_settings" value="1">
+    <div class="form-field">
+      <label style="display:flex; gap:6px; align-items:center;">
+        <input type="checkbox" name="portal_enabled" {{ 'checked' if current.portal_enabled }}> تفعيل بوابة النتائج
+      </label>
+    </div>
+    <div class="form-grid">
+      <div class="form-field"><label>طريقة النشر</label>
+        <select name="portal_mode" id="portalMode" onchange="portalModeChanged()">
+          <option value="local" {{ 'selected' if current.portal_mode == 'local' }}>مدمجة بالبرنامج (بدون Render ولا GitHub) — موصى بها</option>
+          <option value="remote" {{ 'selected' if current.portal_mode == 'remote' }}>بوابة خارجية على Render (القديمة)</option>
+        </select></div>
+      <div class="form-field"><label>رابط البوابة العام (https://...)</label>
+        <input type="text" name="portal_url" dir="ltr" placeholder="https://lab-pc.tail1234.ts.net" value="{{ current.portal_url }}"></div>
+      <div class="form-field" id="portalKeyField"><label>المفتاح السري (API_SECRET_KEY) — للطريقة الخارجية فقط {% if current.portal_key_set %}<span class="muted">— محفوظ، اتركه فاضي للإبقاء عليه</span>{% endif %}</label>
+        <input type="password" name="portal_api_key" dir="ltr" autocomplete="new-password" placeholder="{{ '••••••••' if current.portal_key_set else 'نفس القيمة المضبوطة بـ Render' }}"></div>
+      <div class="form-field"><label>مدة بقاء رابط المريض (أيام)</label>
+        <input type="number" name="portal_retention_days" min="1" max="365" value="{{ current.portal_retention_days }}" style="width:120px;">
+        <span class="muted">بعدها يُحذف الرابط من البوابة؛ ملف PDF اللي نزّله المريض يبقى عنده.</span></div>
+      <div class="form-field"><label>الوقت المتوقع الافتراضي (بالساعات)</label>
+        <input type="number" name="portal_default_hours" min="0" max="240" step="0.5" value="{{ current.portal_default_hours }}" style="width:120px;"></div>
+      <div class="form-field"><label>تظهر النتائج للمريض عندما تكون الحالة</label>
+        <select name="portal_ready_when">
+          <option value="completed" {{ 'selected' if current.portal_ready_when == 'completed' }}>مكتملة (Completed أو Verified)</option>
+          <option value="verified" {{ 'selected' if current.portal_ready_when == 'verified' }}>معتمدة فقط (Verified)</option>
+        </select></div>
+    </div>
+    <div class="form-field"><label style="display:flex; align-items:center; gap:8px; font-weight:normal;">
+      <input type="checkbox" name="portal_pdf_enabled" value="1" {{ 'checked' if current.portal_pdf_enabled }}>
+      إرفاق نسخة PDF (بنفس تصميم تقارير المختبر) لتنزيلها من موبايل المريض وإرسالها لطبيبه</label>
+      <span class="muted">تحتاج وحدة pdf_export الموجودة عندك (نفس اللي تستخدمه الأرشفة). لو فشلت يبقى عرض النتائج بالصفحة شغّال.</span></div>
+    <div class="form-field"><label>وقت مخصص لتحاليل معيّنة (سطر لكل تحليل: كود=ساعات — مثل FBS=1)</label>
+      <textarea name="portal_tat_overrides" rows="3" dir="ltr" placeholder="FBS=1&#10;HBA1C=24">{{ current.portal_tat_overrides }}</textarea></div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <button class="btn" type="submit">{{ t('save_settings') }}</button>
+      <button class="btn secondary" type="button" onclick="portalTest(this)">🔌 اختبار الاتصال</button>
+      <span id="portalTestMsg" class="muted"></span>
+    </div>
+  </form>
+  <script>
+    function portalModeChanged() {
+      var remote = document.getElementById('portalMode').value === 'remote';
+      document.getElementById('portalKeyField').style.display = remote ? '' : 'none';
+      document.getElementById('portalLocalHelp').style.display = remote ? 'none' : '';
+    }
+    document.addEventListener('DOMContentLoaded', portalModeChanged);
+    function portalTest(btn) {
+      var m = document.getElementById('portalTestMsg'); m.textContent = '... جاري الاختبار (قد يستغرق دقيقة إذا كانت البوابة نائمة)';
+      btn.disabled = true;
+      fetch("{{ url_for('api_portal_test') }}", {method: 'POST'}).then(function (r) { return r.json(); })
+        .then(function (d) { m.textContent = d.message; }).catch(function () { m.textContent = 'تعذر الاختبار'; })
+        .finally(function () { btn.disabled = false; });
+    }
+  </script>
+  <p class="muted" style="font-size:12px;">⚠️ احفظ الإعدادات أولاً ثم اضغط اختبار الاتصال.</p>
+</div>
+
+<div class="card" id="sampleNoCard">
+  <h3>🧪 رقم العينة (Sample No.)</h3>
+  <p class="muted">
+    يظهر كحقل بصفحة "زيارة جديدة" (قابل للتعديل يدويًا) ويُطبع بخانة Sample No. بالتقارير.
+    التسلسل يبدأ من جديد (1) حسب فترة التصفير اللي تختارها. الرقم التالي هسه:
+    <b class="mono">{{ current.sample_no_next }}</b>
+  </p>
+  <form method="POST">
+    <input type="hidden" name="sample_no_settings" value="1">
+    <div class="form-grid">
+      <div class="form-field"><label>يبدأ التسلسل من جديد</label>
+        <select name="sample_no_reset">
+          {% for v, t in [('daily','كل يوم'),('monthly','كل شهر'),('yearly','كل سنة'),('never','أبدًا (تسلسل مستمر)')] %}
+          <option value="{{ v }}" {{ 'selected' if current.sample_no_reset == v }}>{{ t }}</option>{% endfor %}
+        </select></div>
+      <div class="form-field"><label>جزء التاريخ بالرقم</label>
+        <select name="sample_no_date_part">
+          {% for v, t in [('none','بدون'),('yymmdd','سنة+شهر+يوم (260928)'),('yymm','سنة+شهر (2609)'),('yy','سنة (26)')] %}
+          <option value="{{ v }}" {{ 'selected' if current.sample_no_date_part == v }}>{{ t }}</option>{% endfor %}
+        </select></div>
+      <div class="form-field"><label>بادئة (اختياري، مثل S-)</label>
+        <input type="text" name="sample_no_prefix" maxlength="10" value="{{ current.sample_no_prefix }}"></div>
+      <div class="form-field"><label>عدد خانات التسلسل (3 = 001)</label>
+        <input type="number" name="sample_no_padding" min="1" max="8" value="{{ current.sample_no_padding }}" style="width:100px;"></div>
+    </div>
+    <button class="btn" type="submit">حفظ إعدادات رقم العينة</button>
+  </form>
+</div>
+
 <div class="card" style="max-width:640px;">
   <h3>📏 تباعد صندوق معلومات المريض</h3>
   <p class="muted">

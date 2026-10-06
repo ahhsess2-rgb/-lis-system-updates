@@ -30,7 +30,58 @@
   </div>
   {% endif %}
 
-  {% for vd in visit_data %}
+  {# ===== جدول ملخص كل زيارات المريض: الأحدث أولاً. الضغط على أي خانة يفتح التقرير PDF للطباعة ===== #}
+  {% set sorted_visits = visit_data|sort(attribute='visit.created_at', reverse=true) %}
+  <div class="card">
+    <h3 style="margin-top:0;">📑 ملخص الزيارات والتحاليل <span class="muted" style="font-size:13px;">(اضغط على أي سطر لفتح النتيجة للطباعة)</span></h3>
+    <div style="overflow-x:auto;">
+    <table class="hist-summary">
+      <thead><tr>
+        <th>التاريخ</th><th>رقم الزيارة</th><th>المريض</th><th>العمر</th>
+        <th>الطبيب المرسل</th><th>التحاليل</th><th>الحالة</th><th></th>
+      </tr></thead>
+      <tbody>
+      {% for vd in sorted_visits %}
+        {% set total = vd.tests|length %}
+        {% set pending = vd.tests|rejectattr('order_test.status', 'in', ['Completed','Verified'])|list|length %}
+        {% set report_url = url_for('print_visit_full_report', visit_id=vd.visit['id']) %}
+        {% set doctor = vd.visit['referring_doctor'] or '—' %}
+        <tr class="hist-row" data-href="{{ report_url }}" style="cursor:pointer;">
+          <td>{{ vd.visit['created_at'][:10] if vd.visit['created_at'] else '' }}</td>
+          <td>#{{ vd.visit['registration_number'] }}</td>
+          <td>{{ patient['full_name'] }}</td>
+          <td>{{ patient['age'] if patient['age'] else '' }} {{ patient['age_unit'] or '' }}</td>
+          <td>{{ doctor }}</td>
+          <td>
+            {% for tw in vd.tests %}
+              <span class="badge" style="margin:1px;">{{ tw.order_test['test_name'] }}{% if tw.order_test['status'] not in ['Completed','Verified'] %} ⏳{% endif %}</span>{% if can_edit_results %}<a href="{{ url_for('result_entry', order_test_id=tw.order_test['id']) }}" title="تعديل النتيجة" style="text-decoration:none;">✏️</a>{% endif %}
+            {% else %}<span class="muted">—</span>{% endfor %}
+          </td>
+          <td>
+            {% if total and pending == 0 %}<span class="badge badge-normal">✅ مكتمل</span>
+            {% elif total %}<span class="badge badge-critical">⏳ غير مكتمل ({{ pending }}/{{ total }})</span>
+            {% else %}<span class="badge">{{ vd.visit['status'] }}</span>{% endif %}
+          </td>
+          <td><a class="btn small" target="_blank" rel="noopener" href="{{ report_url }}">🖨️ طباعة</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  <style>
+    .hist-row:hover { background: rgba(148,163,184,.15); }
+  </style>
+  <script>
+    document.querySelectorAll('.hist-row').forEach(function (tr) {
+      tr.addEventListener('click', function (e) {
+        if (e.target.closest('a')) return;
+        window.open(tr.dataset.href, '_blank', 'noopener');
+      });
+    });
+  </script>
+
+  {% for vd in sorted_visits %}
   <div class="card">
     <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
       <h3 style="margin:0;">زيارة #{{ vd.visit['registration_number'] }} — {{ vd.visit['created_at'][:10] if vd.visit['created_at'] else '' }}
@@ -39,7 +90,9 @@
       <div style="display:flex; gap:8px;">
         <a class="btn small" target="_blank" rel="noopener"
            href="{{ url_for('print_visit_full_report', visit_id=vd.visit['id']) }}">🖨️ عرض/طباعة التقرير الكامل</a>
+        {% if session.get('interface') == 'both' or session.get('designer_id') %}
         <a class="btn small secondary" href="{{ url_for('visit_edit', visit_id=vd.visit['id']) }}">✏️ تعديل هذه الزيارة</a>
+        {% endif %}
       </div>
     </div>
 

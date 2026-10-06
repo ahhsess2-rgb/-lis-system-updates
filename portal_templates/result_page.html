@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>{{ lab_name or 'نتيجة التحليل' }}</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+    background: #F1F5F9; margin: 0; padding: 20px;
+    padding-top: calc(20px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+    color: #1E293B;
+  }
+  .card {
+    max-width: 640px; margin: 0 auto; background: #fff; border-radius: 14px;
+    box-shadow: 0 4px 18px rgba(0,0,0,.08); padding: 24px 20px; overflow-x: auto;
+  }
+  .lab-title { text-align: center; font-size: 15px; font-weight: 700; color: #205072; margin-bottom: 18px; }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .muted { color: #64748B; font-size: 13px; }
+  .status-pending {
+    background: #FEF9E7; border: 1px solid #F4D06F; border-radius: 10px;
+    padding: 16px; text-align: center; margin-top: 16px;
+  }
+  .status-pending .icon { font-size: 34px; margin-bottom: 8px; }
+  .status-ready { margin-top: 18px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid #E2E8F0; padding: 6px 8px; text-align: center; }
+  th { background: #205072; color: #fff; }
+  .not-found { text-align: center; padding: 40px 10px; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0 6px; }
+  .btn { flex: 1 1 140px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 13px 10px; border-radius: 10px; border: 0; font: inherit; font-size: 15px; font-weight: 700;
+    text-decoration: none; cursor: pointer; }
+  .btn-main { background: #205072; color: #fff; }
+  .btn-alt { background: #E8F1F6; color: #205072; }
+  .save-tip { background: #F0FDF4; border: 1px solid #BBF7D0; border-radius: 10px; padding: 10px 12px;
+    font-size: 12.5px; color: #166534; line-height: 1.7; margin: 8px 0 4px; }
+  .save-tip b { color: #14532D; }
+  .toast { position: fixed; inset-inline: 20px; bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+    background: #1E293B; color: #fff; padding: 10px 14px; border-radius: 10px; font-size: 13px; text-align: center;
+    display: none; z-index: 10; }
+  .footer-note { text-align: center; font-size: 11px; color: #94A3B8; margin-top: 20px; }
+</style>
+</head>
+<body>
+<div class="card">
+  {% if not_found %}
+  <div class="not-found">
+    <div style="font-size:40px;">🔍</div>
+    <h1>لم يُعثر على هذا الرابط</h1>
+    <p class="muted">تأكد من مسح QR الصحيح، أو راجع المختبر.</p>
+  </div>
+  {% else %}
+  <div class="lab-title">{{ lab_name }}</div>
+  <h1>مرحباً، {{ patient_name }}</h1>
+
+  {% if status == 'pending' %}
+  <div class="status-pending">
+    <div class="icon">⏳</div>
+    <b>نتائجك قيد التحضير حالياً</b><br>
+    {% if eta_text %}<span class="muted">{{ eta_text }}</span><br>{% endif %}
+    <span class="muted">أعد فتح هذا الرابط لاحقاً لمشاهدة النتيجة بمجرد جاهزيتها.</span>
+  </div>
+  {% else %}
+  {% if has_pdf %}
+  <div class="actions">
+    <a class="btn btn-main" id="btnDownload" href="{{ pdf_url }}" download>⬇️ تحميل النتائج PDF</a>
+    <button class="btn btn-alt" id="btnShare" type="button" style="display:none;">📤 إرسال للطبيب</button>
+  </div>
+  <div class="save-tip">
+    💾 <b>احفظ نسختك:</b> بعد التحميل يبقى ملف PDF بموبايلك (مجلد التنزيلات / تطبيق الملفات) وتفتحه
+    بأي وقت <b>بدون مسح الـQR ولا إنترنت</b>، وتقدر ترسله لطبيبك بالواتساب أو الإيميل.
+    {% if expires_on %}رابط هذي الصفحة يبقى شغّال لحد <b><bdi dir="ltr">{{ expires_on }}</bdi></b> فقط ({{ retention_days }} يوم)، لذلك حمّل الـPDF.{% endif %}
+  </div>
+  {% endif %}
+  <div class="status-ready">
+    {{ results_html | safe }}
+  </div>
+  {% endif %}
+
+  <div class="footer-note">آخر تحديث: <bdi dir="ltr">{{ updated_at }}</bdi></div>
+  {% endif %}
+</div>
+<div class="toast" id="toast"></div>
+{% if has_pdf and not not_found %}
+<script>
+(function () {
+  var PDF_URL = {{ pdf_url | tojson }};
+  var FILE_NAME = {{ pdf_filename | tojson }};
+  var share = document.getElementById('btnShare');
+  var toast = document.getElementById('toast');
+  function say(msg) { toast.textContent = msg; toast.style.display = 'block'; setTimeout(function () { toast.style.display = 'none'; }, 3500); }
+  // مشاركة الملف نفسه (واتساب/إيميل/...) تعمل على أغلب موبايلات أندرويد وآيفون؛ لو غير مدعومة نخفي الزر ويبقى زر التحميل
+  if (share && navigator.share && navigator.canShare) {
+    share.style.display = 'inline-flex';
+    share.addEventListener('click', function () {
+      fetch(PDF_URL, { credentials: 'omit' }).then(function (r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.blob();
+      }).then(function (blob) {
+        var file = new File([blob], FILE_NAME, { type: 'application/pdf' });
+        if (!navigator.canShare({ files: [file] })) { window.location.href = PDF_URL; say('تم تنزيل الملف، أرسله من تطبيق الملفات.'); return; }
+        return navigator.share({ files: [file], title: 'نتائج التحاليل' });
+      }).catch(function (e) {
+        if (e && e.name === 'AbortError') return;   // المريض ألغى المشاركة
+        window.location.href = PDF_URL; say('تعذرت المشاركة المباشرة — تم تنزيل الملف بدلاً منها.');
+      });
+    });
+  }
+})();
+</script>
+{% endif %}
+</body>
+</html>

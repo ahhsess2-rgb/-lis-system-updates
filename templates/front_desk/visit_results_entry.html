@@ -10,6 +10,27 @@
   <button type="button" class="btn small secondary"
      onclick="lisSaveThenPrint('{{ url_for('print_combined_panel', visit_id=visit['id']) }}', 'اللوحة المجمّعة')"
      title="يجمع تحاليل الكيمياء/الفايروسات/الهرمونات/الفيتامينات وأي قسم آخر بورقة A4 وحدة، مرتّبة حسب القسم">🧾 طباعة اللوحة المجمّعة</button>
+  <button type="button" class="btn small secondary"
+     onclick="lisSaveThenPrint('{{ url_for('print_combined_panel', visit_id=visit['id']) }}?headings=0', 'التقرير الشامل')"
+     title="كل تحاليل الكيمياء والهرمونات والفيتامينات والفايروسات والدلائل الورمية والتخثر بتقرير واحد بدون عناوين أقسام (ما عدا CBC وBlood film وRetic وBMA وBMP وFluid وHb.H وElectrophoresis)">📄 التقرير الشامل (بدون أقسام)</button>
+  <a class="btn small secondary" target="_blank" href="{{ url_for('print_visit_portal_qr', visit_id=visit['id']) }}"
+     title="طباعة QR يمسحه المريض بموبايله لمشاهدة نتائجه (غير باركود القناني)">📱 QR المريض</a>
+  <label style="margin-inline-start:10px; display:inline-flex; align-items:center; gap:4px; font-weight:normal;"
+         title="عدد الزيارات السابقة لنفس المريض ونفس التحليل اللي تظهر نتائجها بالتقرير — 0 = لا تظهر. الترتيب من الإعدادات (تصميم التقارير).">
+    الزيارات السابقة:
+    <select id="prevVisitsCount" onchange="lisSavePrevCount(this.value)">
+      {% for n in range(0, 7) %}<option value="{{ n }}" {{ 'selected' if n == prev_visits_count }}>{{ 'بدون' if n == 0 else n }}</option>{% endfor %}
+    </select>
+    <span id="prevVisitsCountMsg" class="muted" style="font-size:11px;"></span>
+  </label>
+  <script>
+    function lisSavePrevCount(v) {
+      var fd = new FormData(); fd.append('count', v);
+      fetch("{{ url_for('api_set_visit_prev_count', visit_id=visit['id']) }}", {method: 'POST', body: fd})
+        .then(function (r) { return r.json(); })
+        .then(function (d) { document.getElementById('prevVisitsCountMsg').textContent = d.ok ? '✓ تم' : (d.error || 'تعذر الحفظ'); });
+    }
+  </script>
   {% if visit['phone'] %}
   <form method="POST" action="{{ url_for('whatsapp_send_visit', visit_id=visit['id']) }}"
         style="display:inline;" onsubmit="return confirm('إرسال كل النتائج المكتملة لهذه الزيارة بملف PDF واحد مجمّع عبر واتساب لرقم المريض؟');">
@@ -151,6 +172,9 @@
     return fetch(postUrl, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'fetch' } })
       .then(function (r) { return r.json(); });
   }
+  function lisWithAuto(url) {
+    return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'auto=1';
+  }
   function lisWithShowPrev(url) {
     var tg = document.getElementById('showPrevToggle');
     if (!tg) return url;
@@ -161,7 +185,7 @@
       return lisPostJson(postUrl, form, gate).then(function (data) {
         if (data.ok) {
           lisDirty = false;
-          openReportModal(lisWithShowPrev(getUrl(data)), title);
+          openReportModal(lisWithAuto(lisWithShowPrev(getUrl(data))), title);
           return;
         }
         if (data.needs_gate) {

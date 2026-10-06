@@ -13,6 +13,8 @@ import shutil
 import sqlite3
 import tempfile
 import zipfile
+import threading
+import time
 
 from database import (get_db, init_db, hash_password, get_setting, set_setting,
                        get_test_price, find_or_create_doctor, find_or_create_referral_center,
@@ -31,7 +33,13 @@ from database import (get_db, init_db, hash_password, get_setting, set_setting,
                        get_stamp_placements, upsert_stamp_placement, remove_stamp_placement,
                        get_report_layout, save_report_layout, reset_report_layout, get_raw_layout,
                        find_last_visit_by_name_age, get_visit_completed_tests,
-                       save_visit_previous_merges, get_visit_previous_merges)
+                       save_visit_previous_merges, get_visit_previous_merges,
+                       get_result_layout, effective_labels, save_result_layout, RESULT_STYLES,
+                       RESULT_LABEL_DEFAULTS, get_extra_col_values, save_extra_col_values,
+                       get_previous_history, get_row_notes, save_row_note,
+                       THEME_PRESETS, merged_exclude_keywords, MERGED_EXCLUDE_DEFAULT, resolve_theme_colors,
+                       get_visit_prev_pref, set_visit_prev_pref, effective_prev_count,
+                       peek_next_sample_no, resolve_visit_sample_no)
 from daily_counter import get_patient_number_of_day
 import accounts_search as acs
 import excel_export
@@ -169,6 +177,7 @@ def transliterate_arabic_name(name, db=None):
 
 from translations import t
 from barcode_gen import generate_code39, generate_code128, generate_qr
+import cloud_sync
 import astm_host
 import license_manager
 import auto_updater
@@ -699,6 +708,13 @@ def resolve_value_align(param_row):
 
 app.jinja_env.globals["resolve_label"] = resolve_label
 app.jinja_env.globals["uses_order_style_report"] = uses_order_style_report
+app.jinja_env.globals["RESULT_STYLE_CHOICES"] = [
+    ("a1", "Style A — Labels Set 1"), ("a2", "Style A — Labels Set 2"),
+    ("b_grid", "Style B — Matching Image 1"), ("b_compact", "Style B — Compact"),
+]
+app.jinja_env.globals["RESULT_THEME_CHOICES"] = [
+    ("default", "الألوان الافتراضية"), ("green", "Custom colors (أخضر/بنفسجي/برتقالي)"), ("custom", "ألواني اليدوية"),
+]
 app.jinja_env.globals["resolve_value_align"] = resolve_value_align
 app.jinja_env.globals["VALUE_ALIGN_CSS"] = VALUE_ALIGN_CSS
 
@@ -1297,6 +1313,10 @@ def designer_required(view):
     return wrapped
 
 
+_license_check_cache = None
+_license_check_lock = threading.Lock()
+
+
 @app.before_request
 def enforce_license():
     # المسارات المستثناة من فحص الترخيص: الملفات الثابتة، ولوحة المصمم نفسها
@@ -1320,9 +1340,26 @@ def enforce_license():
             or endpoint.startswith("designer_")
             or endpoint in ("license_locked", "license_activate", "set_lang")):
         return
-    db = get_db()
-    lic = license_manager.check_license(db)
-    db.close()
+    # تعديل: check_license() كانت تُنادى وتكتب بقاعدة البيانات (UPDATE
+    # license_info SET last_ip=..., last_checked=...) على *كل* طلب -- بما
+    # فيها /front-desk/notifications/check اللي يتكرر كل ثواني قليلة تلقائيًا
+    # من كل شاشة مفتوحة. هذا كان يسبب تصادم كتابة كثيف على SQLite ورسائل
+    # "database is locked" / انقطاع اتصال عشوائي (مثلاً عند "Create Visit")
+    # لأن كل طلب ثاني بنفس اللحظة يصادف قفل الكتابة. صار الفحص نفسه (وأهم
+    # شي كتابة last_ip/last_checked) يصير مرة وحدة كل 5 دقائق بحد أقصى --
+    # النتيجة (مفعّل/منتهي/إلخ) تبقى محفوظة بالذاكرة بينهم، فحساسية اكتشاف
+    # ترخيص منتهي ما تتأثر عمليًا (5 دقائق تأخير كحد أقصى، بدل تأخير صفر).
+    global _license_check_cache
+    now_ts = time.time()
+    with _license_check_lock:
+        cached = _license_check_cache
+        if cached is None or (now_ts - cached[0]) > 300:
+            db = get_db()
+            lic = license_manager.check_license(db)
+            db.close()
+            _license_check_cache = (now_ts, lic)
+        else:
+            lic = cached[1]
     if lic["status"] in ("expired", "hardware_mismatch", "pending", "revoked"):
         session.pop("user_id", None)
         session.pop("interface", None)
@@ -1340,6 +1377,10 @@ def enforce_interface_scope():
     if not interface or interface == "both":
         return
     path = request.path
+    # صفحات مشتركة: سجل المريض + تقرير الطباعة مفتوحة لكل الواجهات (استقبال/
+    # مختبر/الاثنين) حتى موظف المختبر يقدر يطبع ويتابع نتائج المريض.
+    if request.endpoint in ("patient_history", "print_visit_full_report"):
+        return
     if interface == "reception" and path.startswith("/workbench"):
         flash("هذي الصفحة خاصة بواجهة المختبر فقط.")
         return redirect(url_for("dashboard"))
@@ -2132,6 +2173,13 @@ def new_visit():
              is_home_visit, home_visit_address, home_visit_fee, session.get("branch_id"), session["user_id"], now),
         )
         visit_id = cur.lastrowid
+        # رقم العينة: من حقل "Sample No." بصفحة زيارة جديدة (يتسلسل من جديد حسب إعداد التصفير)
+        db.execute("UPDATE visits SET sample_no=? WHERE id=?",
+                   (resolve_visit_sample_no(db, request.form.get("sample_no")), visit_id))
+        # بوابة النتائج: رمز QR للمريض + دفع حالة "قيد التحضير" للسحابة (بالخلفية، ما يبطّئ الحفظ)
+        if cloud_sync.get_cfg(db)["enabled"]:
+            cloud_sync.ensure_token(db, visit_id)
+            cloud_sync.trigger()
 
         order_cur = db.execute("INSERT INTO orders (visit_id, status, created_at) VALUES (?, 'Open', ?)",
                                 (visit_id, now))
@@ -2245,6 +2293,10 @@ def new_visit():
         # لنفس المريض) بتقرير هذي الزيارة الجديدة — تُسجَّل هنا بس عند
         # التأكيد الصريح من بنك تنبيه الزيارة السابقة بشاشة "زيارة جديدة"،
         # راجع visit_previous_merges لتفاصيل الآلية.
+        # عدد الزيارات السابقة اللي تظهر نتائجها (0 = إلغاء) — يختاره الموظف بصفحة "زيارة جديدة".
+        _pvc = (request.form.get("prev_visits_count") or "").strip()
+        if _pvc.lstrip("-").isdigit():
+            set_visit_prev_pref(db, visit_id, int(_pvc))
         merge_ids_raw = request.form.get("merge_previous_order_test_ids", "").strip()
         if merge_ids_raw:
             merge_ids = [x for x in merge_ids_raw.split(",") if x.strip().isdigit()]
@@ -2496,12 +2548,13 @@ def patient_history(patient_id):
         return redirect(url_for("visit_edit", visit_id=latest_visit["id"]))
 
     visits = db.execute(
-        "SELECT v.* FROM visits v WHERE v.patient_id=? ORDER BY v.id DESC", (patient_id,),
+        "SELECT v.*, d.full_name as referring_doctor FROM visits v "
+        "LEFT JOIN doctors d ON d.id = v.doctor_id WHERE v.patient_id=? ORDER BY v.id DESC", (patient_id,),
     ).fetchall()
     visit_data = []
     for v in visits:
         order_tests = db.execute(
-            "SELECT ot.id, ot.barcode, td.name as test_name, td.id as test_definition_id "
+            "SELECT ot.id, ot.barcode, ot.status, td.name as test_name, td.id as test_definition_id "
             "FROM order_tests ot JOIN orders o ON o.id = ot.order_id "
             "JOIN test_definitions td ON td.id = ot.test_definition_id WHERE o.visit_id=?",
             (v["id"],),
@@ -2516,7 +2569,11 @@ def patient_history(patient_id):
             tests_with_results.append({"order_test": ot, "results": results})
         visit_data.append({"visit": v, "tests": tests_with_results})
 
-    return render_template("front_desk/patient_history.html", patient=patient, visit_data=visit_data)
+    # التعديل على النتائج: لواجهة المختبر أو الاثنين معًا (أو المصمم) فقط؛ الطباعة
+    # والعرض مفتوحة للجميع.
+    can_edit_results = bool(session.get("designer_id")) or session.get("interface") in ("lab", "both")
+    return render_template("front_desk/patient_history.html", patient=patient,
+                           visit_data=visit_data, can_edit_results=can_edit_results)
 
 
 # بحث موحّد بالصفحة الرئيسية: يبحث بثلاث فئات مرة وحدة — اسم مريض (يظهر
@@ -2532,8 +2589,14 @@ def api_dashboard_search():
     db = get_db()
     patients = db.execute(
         "SELECT p.id, p.full_name, p.gender, p.age, p.age_unit, p.phone, "
-        "(SELECT MAX(v.created_at) FROM visits v WHERE v.patient_id = p.id) as last_visit_at "
-        "FROM patients p WHERE p.full_name LIKE ? ORDER BY p.full_name LIMIT 6",
+        "(SELECT MAX(v.created_at) FROM visits v WHERE v.patient_id = p.id) as last_visit_at, "
+        "(SELECT substr(MAX(v.created_at), 1, 10) FROM visits v WHERE v.patient_id = p.id) as last_visit_date, "
+        "(SELECT d.full_name FROM visits v LEFT JOIN doctors d ON d.id = v.doctor_id "
+        " WHERE v.patient_id = p.id ORDER BY v.id DESC LIMIT 1) as referring_doctor, "
+        "(SELECT COUNT(*) FROM order_tests ot JOIN orders o ON o.id = ot.order_id "
+        " JOIN visits v ON v.id = o.visit_id WHERE v.patient_id = p.id "
+        " AND ot.status NOT IN ('Completed', 'Verified')) as pending_count "
+        "FROM patients p WHERE p.full_name LIKE ? ORDER BY p.full_name LIMIT 10",
         (f"%{q}%",),
     ).fetchall()
     doctors = db.execute(
@@ -2647,6 +2710,35 @@ def api_patients_search():
 # BMB — نفس REPORT_TEMPLATE_MAP) تُعرض كرسالة إعلامية بس بدون أي خيار
 # دمج. أي تحليل من قسم غير مذكور بأي من القائمتين يُهمَل بصمت (لا داعي
 # له بهذا التنبيه أصلاً).
+@app.route("/api/sample-no/next")
+@login_required
+def api_next_sample_no():
+    return jsonify({"sample_no": peek_next_sample_no(get_db())})
+
+
+@app.route("/api/visits/<int:visit_id>/prev-count", methods=["POST"])
+@login_required
+def api_set_visit_prev_count(visit_id):
+    """يحدد/يغيّر عدد الزيارات السابقة اللي تظهر نتائجها بتقارير هذي الزيارة (0 = إلغاء)."""
+    db = get_db()
+    if not db.execute("SELECT id FROM visits WHERE id=?", (visit_id,)).fetchone():
+        return {"ok": False, "error": "الزيارة غير موجودة"}, 404
+    raw = (request.form.get("count") or (request.get_json(silent=True) or {}).get("count") or "").__str__().strip()
+    if not raw.lstrip("-").isdigit():
+        return {"ok": False, "error": "عدد غير صالح"}, 400
+    n = set_visit_prev_pref(db, visit_id, int(raw))
+    log_action("SetVisitPrevCount", "visit", visit_id, str(n))
+    return {"ok": True, "count": n}
+
+
+@app.route("/api/patients/previous-visit-count-options")
+@login_required
+def api_prev_visit_count_options():
+    """خيارات عدد الزيارات السابقة لصفحة \"زيارة جديدة\": الافتراضي من الإعدادات والحد الأقصى."""
+    cfg = get_result_layout(get_db())
+    return jsonify({"default": cfg["prev_count"], "max": 20, "order": cfg["prev_order"]})
+
+
 @app.route("/api/patients/previous-visit-check")
 @login_required
 def api_previous_visit_check():
@@ -2683,11 +2775,53 @@ def api_previous_visit_check():
             if results:
                 val = results["value_text"] if results["value_text"] not in (None, "") else results["value_numeric"]
                 summary = f"{results['param_name']}: {val}" if val not in (None, "") else ""
+            # كم مرة سُحب نفس هذا التحليل لهذا المريض بزيارات سابقة + تواريخها (مدموج من v10)
+            prior_rows = db.execute(
+                "SELECT v.created_at FROM order_tests ot2 "
+                "JOIN orders o2 ON o2.id = ot2.order_id "
+                "JOIN visits v ON v.id = o2.visit_id "
+                "WHERE v.patient_id=? AND ot2.test_definition_id=? AND ot2.status IN ('Completed', 'Verified') "
+                "ORDER BY v.created_at DESC",
+                (match["patient_id"], tst["test_definition_id"]),
+            ).fetchall()
+            prior_dates = []
+            for pr in prior_rows:
+                try:
+                    pdt = datetime.fromisoformat(pr["created_at"])
+                    prior_dates.append(f"{pdt.day}/{pdt.month}/{pdt.year}")
+                except (TypeError, ValueError):
+                    if pr["created_at"]:
+                        prior_dates.append(pr["created_at"])
             mergeable.append({
                 "order_test_id": tst["order_test_id"], "name": tst["test_name"], "summary": summary,
+                "prior_count": len(prior_dates), "prior_dates": prior_dates,
             })
         elif tst["test_code"] in REPORT_TEMPLATE_MAP:
             info_only.append({"order_test_id": tst["order_test_id"], "name": tst["test_name"]})
+
+    # كل التحاليل اللي انعملت لنفس المريض بأي زيارة سابقة (مو بس آخر زيارة) مع عدد زياراتها
+    # وآخر تاريخ — حتى لما يختار الموظف تحليل (مثل FBS) يطلع له إن المريض سبق وسحب له.
+    _cur = db.execute("SELECT full_name, age FROM patients WHERE id=?", (match["patient_id"],)).fetchone()
+    _rows = db.execute(
+        "SELECT td.id AS tdid, td.name AS name, td.department AS department, td.code AS code, "
+        "COUNT(DISTINCT v.id) AS visits, MAX(v.created_at) AS last_at "
+        "FROM order_tests ot JOIN orders o ON o.id = ot.order_id JOIN visits v ON v.id = o.visit_id "
+        "JOIN patients p ON p.id = v.patient_id JOIN test_definitions td ON td.id = ot.test_definition_id "
+        "WHERE ot.status IN ('Completed','Verified') "
+        "AND (v.patient_id=? OR (LOWER(TRIM(p.full_name))=LOWER(TRIM(?)) AND p.age=?)) "
+        "GROUP BY td.id ORDER BY td.name",
+        (match["patient_id"], (_cur["full_name"] if _cur else full_name) or "", age),
+    ).fetchall()
+    history_tests = []
+    for r in _rows:
+        if r["code"] in REPORT_TEMPLATE_MAP and r["code"] != "COAG":
+            continue
+        try:
+            _d = datetime.fromisoformat(r["last_at"]); _dd = f"{_d.day:02d}/{_d.month:02d}/{_d.year}"
+        except (TypeError, ValueError):
+            _dd = r["last_at"] or ""
+        history_tests.append({"test_definition_id": r["tdid"], "name": r["name"], "department": r["department"] or "",
+                              "visits": r["visits"], "last_date": _dd})
 
     return jsonify({
         "found": True,
@@ -2695,6 +2829,8 @@ def api_previous_visit_check():
         "date_display": date_display,
         "mergeable": mergeable,
         "info_only": info_only,
+        "history_tests": history_tests,
+        "default_count": get_result_layout(db)["prev_count"],
     })
 
 
@@ -5312,7 +5448,10 @@ def visit_results_entry(visit_id):
             "ranges": ranges, "suggestions_map": suggestions_map, "history_map": history_map,
         })
 
+    _pv_cfg = get_result_layout(db)
+    _pv_has_merge = bool(get_visit_previous_merges(db, visit_id))
     return render_template("front_desk/visit_results_entry.html", visit=visit, boxes=boxes,
+                            prev_visits_count=effective_prev_count(db, visit_id, _pv_cfg, _pv_has_merge),
                             patient_hct=get_visit_hct(db, visit_id),
                             patient_hct_normal=get_normal_hct(db, visit["gender"], visit["age"], visit["age_unit"]),
                             # هل كل تحاليل هذي الزيارة مكتملة/معتمدة؟ — يُستخدم لإظهار
@@ -5346,6 +5485,171 @@ def _panel_column_labels(department_name):
     return {"name_header": "Test Name", "range_header": "Normal Range"}
 
 
+def build_layout_view(db, style_override=None, cfg=None, theme_override=None):
+    """يجهّز كل ما يحتاجه القالب المشترك reports/partials/result_styles.html:
+    الأسلوب، التسميات النهائية (الافتراضية + تخصيص المستخدم)، الألوان، وتوزيع
+    الأعمدة الإضافية حسب مكانها بالأسلوب المختار."""
+    cfg = cfg or get_result_layout(db)
+    style = style_override if style_override in RESULT_STYLES else cfg["style"]
+    labels = effective_labels(cfg, style)
+    ex = {k: [] for k in ("test", "result", "unit", "range", "conv", "si", "name")}
+    for c in cfg["extra_cols"]:
+        if str(c.get("show", "1")) in ("0", "False", "false"):
+            continue
+        after = c.get("after") or "test"
+        if style in ("a1", "a2"):
+            key = {"conv": "result", "si": "unit"}.get(after, after)
+            key = key if key in ("test", "result", "unit", "range") else "test"
+        elif style == "b_grid":
+            key = {"test": "test", "result": "conv", "unit": "conv", "range": "si",
+                   "conv": "conv", "si": "si"}.get(after, "test")
+        else:
+            key = "name"
+        ex[key].append(c)
+    theme = theme_override if theme_override in ("default", "green", "custom") else cfg["theme"]
+    return {"style": style, "labels": labels, "colors": resolve_theme_colors(cfg, theme), "theme": theme, "ex": ex,
+            "prev_order": cfg["prev_order"], "dept_headings": cfg["dept_headings"],
+            "prev_count": cfg["prev_count"], "prev_default_show": cfg["prev_default_show"],
+            "show_prev_visit_line": cfg["show_prev_visit_line"],
+            "extra_cols": cfg["extra_cols"], "unit_gap": cfg.get("unit_gap", 6)}
+
+
+def _history_with_unit2(hist_list, factor):
+    out = []
+    for h in hist_list or []:
+        out.append({"date": h["date"], "value": h["value"],
+                    "value2": format_unit2_value(h["value"], factor) if factor not in (None, "", 0) else None})
+    return out
+
+
+def _row_extras_and_note(ctx, td_id, pname):
+    """(extras{id: نص}, note, note_key) لصف معيّن — من ctx اللي تبنيه مسارات الطباعة."""
+    key = f"{td_id}|{pname}"
+    extras = {}
+    for eid, mp in (ctx.get("extra_values") or {}).items():
+        v = (mp or {}).get(key)
+        if v:
+            extras[eid] = v
+    note = (ctx.get("notes") or {}).get(key)
+    return extras, note, key
+
+
+def _build_panel_rows_for_ot(db, ot, visit, merged_by_test_def, ctx=None):
+    """يبني صفوف عرض تحليل واحد (اسم/نتيجة/وحدة/مدى طبيعي/نتيجة سابقة...)
+    بنفس المنطق حرفيًا -- تُستخدم من مسارين: اللوحة المجمّعة (print_combined_panel،
+    عدة تحاليل بورقة وحدة) والطباعة المفردة (_print_report_impl، تحليل واحد
+    لحاله). دمجهما بدالة وحدة يضمن التطابق الدائم بينهما: أي إصلاح مستقبلي
+    هنا ينطبق تلقائيًا على الحالتين، فلا يصير فرق شكل بين "تحليل السكر وحده"
+    و"تحليل السكر ضمن تقرير فيه عدة تحاليل" -- وهذا بالضبط المطلوب.
+    ot: صف order_tests (لازم يحوي test_definition_id, id, test_name, analyzer,
+    panel_color, panel_page_break). ترجع [] لو ما فيه نتائج مُدخلة بعد."""
+    params = db.execute(
+        "SELECT * FROM test_parameters WHERE test_definition_id=? ORDER BY sort_order, id", (ot["test_definition_id"],)
+    ).fetchall()
+    if not params:
+        return []
+    results = db.execute(
+        "SELECT r.*, tp.name as pname FROM results r "
+        "JOIN test_parameters tp ON tp.id = r.test_parameter_id WHERE order_test_id=?",
+        (ot["id"],),
+    ).fetchall()
+    results_by_name = {r["pname"]: r for r in results}
+    multi_param = len(params) > 1
+    rows = []
+    # التخثر: قيمة "PT Control" / "PTT Control" ما تنعرض كصف مستقل، تُرفق مع صف PT/PTT نفسه
+    # (نفس فكرة عمود Control بقالب coagulation.html القديم، ويظهر فقط لو PT أو PTT موجود).
+    _is_coag = (ot["test_code"] or "") == "COAG"
+    control_by_base = {}
+    if _is_coag:
+        for _pn, _rr in results_by_name.items():
+            if _pn.strip().lower().endswith("control"):
+                _cv = _rr["value_text"] if _rr["value_text"] not in (None, "") else _rr["value_numeric"]
+                if _cv not in (None, ""):
+                    control_by_base[_pn.strip()[:-7].strip().lower()] = _cv
+    for p in params:
+        r = results_by_name.get(p["name"])
+        if r is None:
+            continue
+        if _is_coag and p["name"].strip().lower().endswith("control"):
+            continue
+        value = r["value_text"] if r["value_text"] not in (None, "") else r["value_numeric"]
+        if value in (None, ""):
+            continue
+        rng = find_reference_range(db, p["id"], visit["gender"], visit["age"], visit["age_unit"],
+                                    patient_id=visit["patient_id"],
+                                    analyzer=ot["analyzer"] if "analyzer" in ot.keys() else None)
+        if rng and rng["range_text"]:
+            range_display = rng["range_text"]
+        elif rng and rng["low"] is not None and rng["high"] is not None:
+            range_display = f"{rng['low']} - {rng['high']}"
+        elif rng and rng["low"] is not None:
+            range_display = f"≥ {rng['low']}"
+        elif rng and rng["high"] is not None:
+            range_display = f"≤ {rng['high']}"
+        else:
+            range_display = ""
+        if rng and rng["range_text"]:
+            range_tiers = parse_range_tiers(rng["range_text"])
+        elif range_display:
+            range_tiers = [{"label": None, "value": range_display}]
+        else:
+            range_tiers = []
+        value2 = unit2 = range2_display = None
+        if p["unit2"] and p["unit2_factor"] not in (None, "", 0):
+            try:
+                factor = float(p["unit2_factor"])
+                if r["value_numeric"] is not None:
+                    value2 = round(float(r["value_numeric"]) * factor, 2)
+                unit2 = p["unit2"]
+                if rng and rng["low"] is not None and rng["high"] is not None:
+                    range2_display = f"{round(rng['low'] * factor, 2)} - {round(rng['high'] * factor, 2)}"
+            except (TypeError, ValueError):
+                value2 = unit2 = range2_display = None
+        display_name = resolve_label(p) if multi_param else ot["test_name"]
+        previous_display = None
+        for m in merged_by_test_def.get(ot["test_definition_id"], []):
+            prev_val = m["results"].get(p["name"])
+            if prev_val not in (None, ""):
+                previous_display = f"{display_name}: {prev_val} ({m['date_display']})"
+                break
+        ctx = ctx or {}
+        _hist = []
+        if ctx.get("show_prev") and ctx.get("prev_limit", 0) > 0:
+            _hcache = ctx.setdefault("_hist_cache", {})
+            if ot["test_definition_id"] not in _hcache:
+                _hcache[ot["test_definition_id"]] = get_previous_history(
+                    db, visit["id"], ot["test_definition_id"], ctx.get("prev_limit", 2), ctx.get("prev_order", "desc"))
+            _hist = _history_with_unit2(_hcache[ot["test_definition_id"]].get(p["name"]),
+                                        p["unit2_factor"] if p["unit2"] else None)
+        _extras, _note, _nkey = _row_extras_and_note(ctx, ot["test_definition_id"], p["name"])
+        rows.append({
+            "control": control_by_base.get(p["name"].strip().lower()) if _is_coag else None,
+            "history": _hist, "extras": _extras, "note": _note, "note_key": _nkey,
+            "range2": range2_display,
+            "name": display_name,
+            "result": value,
+            "unit": p["unit"] or "",
+            "range_display": range_display,
+            "range_tiers": range_tiers,
+            "flag": r["flag"] if "flag" in r.keys() else None,
+            "value_align": resolve_value_align(p) if multi_param else None,
+            "value2": value2,
+            "unit2": unit2,
+            "range2_display": range2_display,
+            "previous_display": previous_display,
+            "color": p["panel_color"] or ot["panel_color"] or None,
+            "_own_page_break": bool(p["panel_page_break"]),
+        })
+    if not rows:
+        return []
+    for row in rows:
+        if row.pop("_own_page_break", False):
+            row["page_break_before"] = True
+    if ot["panel_page_break"]:
+        rows[0]["page_break_before"] = True
+    return rows
+
+
 @app.route("/front-desk/visits/<int:visit_id>/print/combined-panel")
 @login_required
 def print_combined_panel(visit_id):
@@ -5363,13 +5667,28 @@ def print_combined_panel(visit_id):
 
     order_tests = db.execute(
         "SELECT ot.*, td.code as test_code, td.name as test_name, td.department as department, "
-        "td.report_group as report_group, td.done_by_note as done_by_note "
+        "td.report_group as report_group, td.done_by_note as done_by_note, "
+        "td.panel_color as panel_color, td.panel_page_break as panel_page_break "
         "FROM order_tests ot JOIN test_definitions td ON td.id = ot.test_definition_id "
         "JOIN orders o ON o.id = ot.order_id "
         "WHERE o.visit_id=? AND ot.status IN ('Completed', 'Verified') "
         "ORDER BY COALESCE(NULLIF(TRIM(td.report_group), ''), td.department), td.name",
         (visit_id,),
     ).fetchall()
+
+    # التقرير الشامل: يضم الكيمياء/الهرمونات/الفيتامينات/الفايروسات/الدلائل الورمية/التخثر
+    # ويستثني CBC وBlood film وRetic وBMA وBMP وFluid وHb.H وكل Electrophoresis (قائمة
+    # الاستثناء قابلة للتعديل من "تصميم التقارير"). أي تحليل له قالب مستقل (GUE/GSE/SFA...) ما يدخل.
+    layout_cfg = get_result_layout(db)
+    _excl_kws = merged_exclude_keywords(layout_cfg)
+
+    def _merged_ok(_ot):
+        _code = _ot["test_code"] or ""
+        if _code in REPORT_TEMPLATE_MAP and _code != "COAG":
+            return False
+        _hay = (_code + " " + (_ot["test_name"] or "")).lower()
+        return not any(k in _hay for k in _excl_kws)
+    order_tests = [_o for _o in order_tests if _merged_ok(_o)]
 
     # سطر/أسطر "Done by ..." (المطلوب 7) — كل تحليل داخل هذي اللوحة المجمّعة
     # ممكن يكون له done_by_note مختلف (أجهزة مختلفة لكل تحليل)، فنجمع كل
@@ -5389,114 +5708,24 @@ def print_combined_panel(visit_id):
     merged_by_test_def = {}
     for m in merged_previous:
         merged_by_test_def.setdefault(m["test_definition_id"], []).append(m)
-    current_test_def_ids = {ot["test_definition_id"] for ot in order_tests if ot["test_code"] not in REPORT_TEMPLATE_MAP}
+    current_test_def_ids = {ot["test_definition_id"] for ot in order_tests}
+
+    # عدد الزيارات السابقة = اختيار الموظف بصفحة "زيارة جديدة" (0 = إلغاء)، وترتيبها من الإعدادات.
+    prev_count_eff = effective_prev_count(db, visit_id, layout_cfg, bool(merged_by_test_def))
+    prev_toggle_available = prev_count_eff > 0
+    _sp = request.args.get("show_prev")
+    show_prev_values = prev_toggle_available and ((_sp != "0") if _sp is not None else bool(layout_cfg["prev_default_show"]))
+    row_ctx = {
+        "show_prev": show_prev_values, "prev_limit": prev_count_eff, "prev_order": layout_cfg["prev_order"],
+        "notes": get_row_notes(db, visit_id), "extra_values": get_extra_col_values(db),
+    }
 
     groups_by_dept = {}
     dept_order = []
     for ot in order_tests:
-        if ot["test_code"] in REPORT_TEMPLATE_MAP:
-            continue  # لهذا التحليل تقريره الكبير الخاص، ما يدخل باللوحة المجمّعة
-        params = db.execute(
-            "SELECT * FROM test_parameters WHERE test_definition_id=? ORDER BY sort_order, id", (ot["test_definition_id"],)
-        ).fetchall()
-        if not params:
-            continue
-        results = db.execute(
-            "SELECT r.*, tp.name as pname FROM results r "
-            "JOIN test_parameters tp ON tp.id = r.test_parameter_id WHERE order_test_id=?",
-            (ot["id"],),
-        ).fetchall()
-        results_by_name = {r["pname"]: r for r in results}
-        multi_param = len(params) > 1
-        rows = []
-        for p in params:
-            r = results_by_name.get(p["name"])
-            if r is None:
-                continue
-            value = r["value_text"] if r["value_text"] not in (None, "") else r["value_numeric"]
-            if value in (None, ""):
-                continue
-            rng = find_reference_range(db, p["id"], visit["gender"], visit["age"], visit["age_unit"],
-                                        patient_id=visit["patient_id"],
-                                        analyzer=ot["analyzer"] if "analyzer" in ot.keys() else None)
-            # المدى الطبيعي بعمود واحد مدمج (بدون Low/High منفصلة) — نفضّل
-            # range_text الجاهز لو موجود (يغطي حالات نصية زي "Non-Reactive
-            # (< 1.0)")، وإلا نبنيه يدويًا من low/high الرقميين لو موجودين.
-            if rng and rng["range_text"]:
-                range_display = rng["range_text"]
-            elif rng and rng["low"] is not None and rng["high"] is not None:
-                range_display = f"{rng['low']} - {rng['high']}"
-            elif rng and rng["low"] is not None:
-                range_display = f"≥ {rng['low']}"
-            elif rng and rng["high"] is not None:
-                range_display = f"≤ {rng['high']}"
-            else:
-                range_display = ""
-            # مستويات نص حر متعدد الأسطر (المطلوب 4ب) — نفس منطق custom_rows
-            # بالضبط: لو range_text موجود يُفكّ لعدة مستويات (Label: value لكل
-            # سطر)، وإلا سطر واحد بلا تسمية من range_display الجاهزة أعلاه.
-            if rng and rng["range_text"]:
-                range_tiers = parse_range_tiers(rng["range_text"])
-            elif range_display:
-                range_tiers = [{"label": None, "value": range_display}]
-            else:
-                range_tiers = []
-            # الوحدة الثانية (unit2/unit2_factor) — سطر ثاني أصغر تحت
-            # النتيجة والوحدة والمدى الطبيعي (زي S. Creatinine بالصورة:
-            # mg/dL فوق وµmol/L تحت) — تُحسب فقط للنتائج الرقمية.
-            value2 = unit2 = range2_display = None
-            if p["unit2"] and p["unit2_factor"] not in (None, "", 0):
-                try:
-                    factor = float(p["unit2_factor"])
-                    if r["value_numeric"] is not None:
-                        value2 = round(float(r["value_numeric"]) * factor, 2)
-                    unit2 = p["unit2"]
-                    if rng and rng["low"] is not None and rng["high"] is not None:
-                        range2_display = f"{round(rng['low'] * factor, 2)} - {round(rng['high'] * factor, 2)}"
-                except (TypeError, ValueError):
-                    value2 = unit2 = range2_display = None
-            display_name = resolve_label(p) if multi_param else ot["test_name"]
-            # صف "Previous" — يظهر بس لو الموظف وافق صراحة على دمج نتيجة
-            # هذا التحليل بالضبط (نفس test_definition_id) من زيارة سابقة،
-            # ولنفس اسم الباراميتر تحديداً (يدعم التحاليل متعددة
-            # الباراميترات بدون خلط قيم باراميترات مختلفة مع بعض).
-            previous_display = None
-            for m in merged_by_test_def.get(ot["test_definition_id"], []):
-                prev_val = m["results"].get(p["name"])
-                if prev_val not in (None, ""):
-                    previous_display = f"{display_name}: {prev_val} ({m['date_display']})"
-                    break
-            rows.append({
-                "name": display_name,
-                "result": value,
-                "unit": p["unit"] or "",
-                "range_display": range_display,
-                "range_tiers": range_tiers,
-                "flag": r["flag"] if "flag" in r.keys() else None,
-                "value_align": resolve_value_align(p) if multi_param else None,
-                "value2": value2,
-                "unit2": unit2,
-                "range2_display": range2_display,
-                "previous_display": previous_display,
-                # لون مخصص + فاصل صفحة اختياريان — الأولوية دائماً للباراميتر
-                # المفرد (test_parameters.panel_color/panel_page_break، يُضبط
-                # من "مصمم التقارير" لكل باراميتر لحاله)؛ لو غير مضبوط له
-                # تحديداً، يرجع لإعداد التحليل كامل (test_definitions) كسلوك
-                # احتياطي قديم — هذا يسمح بتلوين باراميتر وحدة بس (زي NRBC)
-                # داخل تحليل متعدد الباراميترات (زي Blood film) بدون ما
-                # يلوّن باقي باراميتراته.
-                "color": p["panel_color"] or ot["panel_color"] or None,
-                "_own_page_break": bool(p["panel_page_break"]),
-            })
+        rows = _build_panel_rows_for_ot(db, ot, visit, merged_by_test_def, row_ctx)
         if not rows:
             continue
-        # فاصل الصفحة: كل صف يحمل فاصله المفرد (لو مضبوط لباراميتره تحديداً)،
-        # وفاصل التحليل كامل (لو مفعّل) يُطبَّق فقط على أول صف من صفوفه.
-        for row in rows:
-            if row.pop("_own_page_break", False):
-                row["page_break_before"] = True
-        if ot["panel_page_break"]:
-            rows[0]["page_break_before"] = True
         # الأولوية دائماً لاسم "الريبورت المجمّع" المخصص (report_group) إذا
         # الأدمن حدده لهذا التحليل من كتالوج التحاليل — وإلا نرجع لاسم
         # القسم (department) القديم كما كان الوضع قبل هذي الميزة.
@@ -5511,10 +5740,10 @@ def print_combined_panel(visit_id):
     # مقابلة) بنفس مجموعة قسمها، بدل ما تُفقَد لأن ما فيه صف حالي تُرفَق
     # جنبه.
     for test_def_id, merges in merged_by_test_def.items():
-        if test_def_id in current_test_def_ids:
+        if test_def_id in current_test_def_ids or not show_prev_values:
             continue
         td_row = db.execute(
-            "SELECT department, report_group FROM test_definitions WHERE id=?", (test_def_id,)
+            "SELECT department, report_group, name FROM test_definitions WHERE id=?", (test_def_id,)
         ).fetchone()
         if not td_row:
             continue
@@ -5523,24 +5752,27 @@ def print_combined_panel(visit_id):
         ).fetchall()
         multi_param_prev = len(old_params) > 1
         dept = (td_row["report_group"] or "").strip() or td_row["department"] or "Other"
-        for m in merges:
-            prev_rows = []
-            for p in old_params:
-                val = m["results"].get(p["name"])
-                if val in (None, ""):
-                    continue
-                pname = p["name"] if multi_param_prev else m["test_name"]
-                prev_rows.append({
-                    "name": pname, "result": None, "unit": "", "range_display": "",
-                    "range_tiers": [], "flag": None,
-                    "value2": None, "unit2": None, "range2_display": None, "color": None,
-                    "previous_display": f"{pname}: {val} ({m['date_display']})",
-                })
-            if prev_rows:
-                if dept not in groups_by_dept:
-                    groups_by_dept[dept] = []
-                    dept_order.append(dept)
-                groups_by_dept[dept].extend(prev_rows)
+        hist_all = get_previous_history(db, visit_id, test_def_id, prev_count_eff, layout_cfg["prev_order"])
+        prev_rows = []
+        for p in old_params:
+            hl = hist_all.get(p["name"])
+            if not hl:
+                continue
+            pname = resolve_label(p) if multi_param_prev else td_row["name"]
+            _ex, _note, _nkey = _row_extras_and_note(row_ctx, test_def_id, p["name"])
+            prev_rows.append({
+                "name": pname, "result": None, "unit": p["unit"] or "", "range_display": "",
+                "range_tiers": [], "flag": None, "value2": None,
+                "unit2": p["unit2"] if p["unit2"] else None, "range2_display": None, "range2": None,
+                "color": None,
+                "history": _history_with_unit2(hl, p["unit2_factor"] if p["unit2"] else None),
+                "extras": _ex, "note": _note, "note_key": _nkey,
+            })
+        if prev_rows:
+            if dept not in groups_by_dept:
+                groups_by_dept[dept] = []
+                dept_order.append(dept)
+            groups_by_dept[dept].extend(prev_rows)
 
     # ترتيب طباعة أقسام اللوحة المجمّعة — افتراضيًا أبجدي (كما هو بالاستعلام
     # فوق)؛ لو الأدمن حدد ترتيبًا مخصصًا من الإعدادات (combined_panel_group_order)
@@ -5551,6 +5783,10 @@ def print_combined_panel(visit_id):
     if preferred_order:
         remaining = [d for d in dept_order if d not in preferred_order]
         dept_order = [d for d in preferred_order if d in dept_order] + remaining
+    else:
+        # بدون ترتيب مخصص: كيمياء ← فايروسات ← هرمونات ← فيتامينات ← تخثر (نفس ترتيب شاشة النتائج)
+        _orig = list(dept_order)
+        dept_order = sorted(_orig, key=lambda d: (department_priority_rank(d), _orig.index(d)))
 
     panel_groups = [
         {"department": d, "rows": groups_by_dept[d], **_panel_column_labels(d)}
@@ -5583,9 +5819,25 @@ def print_combined_panel(visit_id):
         if _td_rs and _td_rs["row_spacing"]:
             _panel_row_spacing_raw = _td_rs["row_spacing"]
             break
+    _view = build_layout_view(db, style_override=request.args.get("style"), cfg=layout_cfg,
+                              theme_override=request.args.get("theme"))
+    _h = request.args.get("headings")
+    if _h in ("0", "1"):
+        show_dept_headings = _h == "1"
+    elif layout_cfg["dept_headings"] in ("show", "hide"):
+        show_dept_headings = layout_cfg["dept_headings"] == "show"
+    else:
+        show_dept_headings = _view["style"] in ("a1", "a2")
+    all_rows = [r for g in panel_groups for r in g["rows"]]
     return render_template(
         "reports/combined_panel.html",
         panel_groups=panel_groups, logo_url=logo_url, from_other_lab=from_other_lab,
+        show_dept_headings=show_dept_headings, all_rows=all_rows, merged_title=layout_cfg["merged_title"],
+        sample_no=(visit["sample_no"] if "sample_no" in visit.keys() else "") or "",
+        layout_view=_view, note_visit_id=visit_id,
+        report_layout={}, report_layout_has_patient_override=False,
+        prev_toggle_available=prev_toggle_available, show_prev_values=show_prev_values,
+        prev_toggle_checked=show_prev_values,
         visit_date=visit_date, sex=visit["gender"] or "", age=age_display,
         patient_name=visit["patient_name"], patient_id=visit["registration_number"],
         referring_doctor_name=visit["referring_doctor_name"] or "",
@@ -5636,6 +5888,29 @@ def print_report(order_test_id):
         ), 500
 
 
+def _fmt_hhmm(iso):
+    """وقت سحب العينة بصيغة HH:MM (مثل 09:12) بدل النص الخام للـISO."""
+    try:
+        return datetime.fromisoformat(iso).strftime("%H:%M")
+    except (TypeError, ValueError):
+        return iso or ""
+
+
+def _auto_report_template(db, test_definition_id, test_name):
+    """تصميم افتراضي تلقائي لتحليل ما له صف report_templates: يعرض كل باراميترات التحليل
+    (بترتيبها) بالستايل المختار من "تصميم التقارير". هكذا تحليل واحد (مثل FBS) تكتب نتيجته
+    وتطبعه مباشرة بدون ما تصمم له قالب يدوي. ترجع None لو التحليل بلا باراميترات."""
+    params = db.execute(
+        "SELECT name FROM test_parameters WHERE test_definition_id=? ORDER BY sort_order, id", (test_definition_id,)
+    ).fetchall()
+    if not params:
+        return None
+    return {
+        "heading": test_name or "", "heading_align": "center", "rows_align": "right",
+        "rows_json": json.dumps([{"param_name": p["name"]} for p in params], ensure_ascii=False),
+    }
+
+
 def _print_report_impl(order_test_id):
     db = get_db()
     ot = db.execute(
@@ -5645,7 +5920,7 @@ def _print_report_impl(order_test_id):
         "td.show_lab_stamp as show_lab_stamp, td.show_doctor_stamp as show_doctor_stamp, "
         "td.hide_signature_box as hide_signature_box, td.signature_position as signature_position, "
         "p.id as patient_id, p.full_name as patient_name, p.gender, p.age, p.age_unit, "
-        "v.id as visit_id, v.created_at as visit_created_at, v.registration_number, "
+        "v.id as visit_id, v.created_at as visit_created_at, v.registration_number, v.sample_no as visit_sample_no, "
         "v.doctor_id, v.referral_center_id, v.examining_doctor, "
         "d.full_name as referring_doctor_name, rc.name as referral_center_name "
         "FROM order_tests ot "
@@ -5687,6 +5962,7 @@ def _print_report_impl(order_test_id):
             template_name = REPORT_TEMPLATE_MAP["BF"]
 
     custom_template = None
+    auto_template = False
     if not template_name:
         # report_style='generic_exam': تحليل بُني بالكامل من صفحة المعاينة
         # نفسها (سحب أقسام/باراميترات) بدل قالب HTML مكتوب يدويًا — راجع
@@ -5699,15 +5975,19 @@ def _print_report_impl(order_test_id):
     if not template_name:
         custom_template = get_report_template(db, ot["test_definition_id"])
         if not custom_template:
+            # ما له تصميم محفوظ → نبني تصميم تلقائي من باراميتراته بالستايل المختار (ما نرفض الطباعة).
+            custom_template = _auto_report_template(db, ot["test_definition_id"], ot["test_name"])
+            auto_template = custom_template is not None
+        if not custom_template:
             if session.get("role") == "admin":
-                flash("لا يوجد تصميم طباعة لهذا التحليل بعد. صممه من: الإدارة ← مصمم التقارير.")
+                flash("لا يوجد تصميم طباعة لهذا التحليل بعد (ولا باراميترات له). صممه من: الإدارة ← مصمم التقارير.")
                 return redirect(url_for("report_designer", test_definition_id=ot["test_definition_id"]))
             flash("No printable report layout is defined for this test yet.")
             return redirect(url_for("orders_list"))
         _ot_dept_row = db.execute(
             "SELECT department, report_style FROM test_definitions WHERE id=?", (ot["test_definition_id"],)
         ).fetchone()
-        if _ot_dept_row and uses_order_style_report(_ot_dept_row["department"], _ot_dept_row["report_style"]):
+        if auto_template or (_ot_dept_row and uses_order_style_report(_ot_dept_row["department"], _ot_dept_row["report_style"])):
             template_name = "reports/custom_v2.html"
         else:
             template_name = "reports/custom.html"
@@ -5825,6 +6105,17 @@ def _print_report_impl(order_test_id):
     previous_visit_date = matched_merge["date_display"] if matched_merge else None
     previous_values = matched_merge["results"] if matched_merge else {}
 
+    # أسلوب الجدول (Style A/B) + عدد النتائج السابقة + الأعمدة الإضافية + الملاحظات.
+    # الإلغاء لحظة الطباعة/التنزيل: ?show_prev=0 (نفس الخيار القديم بالضبط).
+    layout_cfg = get_result_layout(db)
+    prev_count_eff = effective_prev_count(db, ot["visit_id"], layout_cfg, matched_merge is not None)
+    prev_toggle_available = prev_count_eff > 0
+    _sp = request.args.get("show_prev")
+    result_show_prev = prev_toggle_available and ((_sp != "0") if _sp is not None else bool(layout_cfg["prev_default_show"]))
+    row_ctx = {"notes": get_row_notes(db, ot["visit_id"]), "extra_values": get_extra_col_values(db)}
+    hist_all = (get_previous_history(db, ot["visit_id"], ot["test_definition_id"], prev_count_eff, layout_cfg["prev_order"])
+                if result_show_prev else {})
+
     cbc_groups = None
     if ot["test_code"] == "CBC":
         units_by_name = {p["name"]: p["unit"] for p in parameters}
@@ -5905,7 +6196,14 @@ def _print_report_impl(order_test_id):
                 if low2 is not None and high2 is not None:
                     normal_range2 = f"{low2} - {high2}"
 
+            _prow = params_by_name_row.get(pname)
+            _ex, _note, _nkey = _row_extras_and_note(row_ctx, ot["test_definition_id"], pname)
+            _lbl = resolve_label(_prow, rd.get("label"))
             custom_rows.append({
+                "name": _lbl, "value2": format_unit2_value(result_val, unit2_factor_by_name.get(pname)),
+                "range2": normal_range2, "show_blank": True,
+                "history": _history_with_unit2(hist_all.get(pname), unit2_factor_by_name.get(pname) if unit2_by_name.get(pname) else None),
+                "extras": _ex, "note": _note, "note_key": _nkey,
                 "label": resolve_label(params_by_name_row.get(pname), rd.get("label")),
                 "result": result_val,
                 "unit": units_by_name.get(pname, ""),
@@ -5990,6 +6288,10 @@ def _print_report_impl(order_test_id):
                 })
                 _auto_x += (_s["default_width"] or 140) + 20
 
+    if auto_template:
+        # تصميم تلقائي: نعرض فقط الباراميترات اللي انكتبت لها نتيجة حالية
+        custom_rows = [_r for _r in custom_rows if _r["result"] not in (None, "")]
+
     return render_template(
         template_name,
         ot=ot, params=params, ranges=ranges, units=units, notes=notes, cbc_groups=cbc_groups,
@@ -5997,6 +6299,9 @@ def _print_report_impl(order_test_id):
         custom_heading_align=custom_heading_align, custom_rows_align=custom_rows_align,
         show_prev_values=show_prev_values, previous_visit_date=previous_visit_date,
         previous_values=previous_values, repeat_header_on_print=repeat_header_on_print,
+        layout_view=build_layout_view(db, style_override=request.args.get("style"), cfg=layout_cfg,
+                                      theme_override=request.args.get("theme")), note_visit_id=ot["visit_id"],
+        prev_toggle_available=prev_toggle_available, prev_toggle_checked=result_show_prev,
         logo_url=logo_url, from_other_lab=from_other_lab, font_size=font_size,
         show_exam_signature=show_exam_signature,
         hide_signature_box=bool(ot["hide_signature_box"]),
@@ -6019,8 +6324,8 @@ def _print_report_impl(order_test_id):
         visit_date=visit_date, sex=ot["gender"] or "", age=age_display,
         patient_name=ot["patient_name"], patient_id=ot["registration_number"],
         referring_doctor_name=ot["referring_doctor_name"] or "",
-        sample_no=ot["barcode"] if "barcode" in ot.keys() else "",
-        sample_time=(ot["collected_at"] or ot["accessioned_at"] or "") if "collected_at" in ot.keys() else "",
+        sample_no=(ot["visit_sample_no"] or (ot["barcode"] if "barcode" in ot.keys() else "") or ""),
+        sample_time=_fmt_hhmm((ot["collected_at"] or ot["accessioned_at"] or "") if "collected_at" in ot.keys() else ""),
         number_of=get_patient_number_of_day(db, order_test_id),
         patient_name_en=patient_name_en_value,
         # order_test_id / results_by_name / param_notes / report_comment:
@@ -6029,7 +6334,10 @@ def _print_report_impl(order_test_id):
         # units أعلاه) حتى لا تتكرر مشكلة NameError/UndefinedError.
         order_test_id=order_test_id,
         results_by_name=results_by_name,
-        param_notes={name: r["note"] for name, r in results_by_name.items() if r["note"]},
+        param_notes={
+            name: {"text": r["note"], "label": r["note_label"] or "", "visible": bool(r["note_visible"])}
+            for name, r in results_by_name.items() if r["note"]
+        },
         report_layout=report_layout,
         report_layout_has_patient_override=report_layout_has_patient_override,
         macro_params=macro_params,
@@ -6074,19 +6382,41 @@ def order_test_param_note(order_test_id):
     except (TypeError, ValueError):
         return jsonify({"error": "بيانات غير صالحة"}), 400
     note = request.form.get("note", "")
+    note_label = request.form.get("note_label", "")
     existing = db.execute(
         "SELECT id FROM results WHERE order_test_id=? AND test_parameter_id=?",
         (order_test_id, test_parameter_id),
     ).fetchone()
     if existing:
-        db.execute("UPDATE results SET note=? WHERE id=?", (note, existing["id"]))
+        db.execute("UPDATE results SET note=?, note_label=? WHERE id=?", (note, note_label, existing["id"]))
     else:
         db.execute(
-            "INSERT INTO results (order_test_id, test_parameter_id, note) VALUES (?, ?, ?)",
-            (order_test_id, test_parameter_id, note),
+            "INSERT INTO results (order_test_id, test_parameter_id, note, note_label) VALUES (?, ?, ?, ?)",
+            (order_test_id, test_parameter_id, note, note_label),
         )
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/order-tests/<int:order_test_id>/param-note-visibility", methods=["POST"])
+@login_required
+def order_test_param_note_visibility(order_test_id):
+    # يبدّل note_visible بس (0/1) — خطوة مستقلة عن كتابة نص الملاحظة (مدموج من v10).
+    db = get_db()
+    order_test = db.execute("SELECT id FROM order_tests WHERE id=?", (order_test_id,)).fetchone()
+    if not order_test:
+        return jsonify({"error": "Not found"}), 404
+    try:
+        test_parameter_id = int(request.form.get("test_parameter_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "بيانات غير صالحة"}), 400
+    visible = 1 if request.form.get("visible") == "1" else 0
+    db.execute(
+        "UPDATE results SET note_visible=? WHERE order_test_id=? AND test_parameter_id=?",
+        (visible, order_test_id, test_parameter_id),
+    )
+    db.commit()
+    return jsonify({"ok": True, "visible": bool(visible)})
 
 
 # ---------------------------------------------------------------- report layout --
@@ -8524,6 +8854,34 @@ def app_settings():
             except ValueError:
                 pass
 
+        if request.form.get("sample_no_settings"):
+            _r = request.form.get("sample_no_reset", "daily")
+            set_setting(db, "sample_no_reset", _r if _r in ("daily", "monthly", "yearly", "never") else "daily")
+            _d = request.form.get("sample_no_date_part", "none")
+            set_setting(db, "sample_no_date_part", _d if _d in ("none", "yymmdd", "yymm", "yy") else "none")
+            set_setting(db, "sample_no_prefix", (request.form.get("sample_no_prefix") or "").strip()[:10])
+            _p = (request.form.get("sample_no_padding") or "3").strip()
+            set_setting(db, "sample_no_padding", _p if _p.isdigit() and 1 <= int(_p) <= 8 else "3")
+
+        if request.form.get("portal_settings"):
+            set_setting(db, "portal_enabled", "1" if request.form.get("portal_enabled") else "0")
+            set_setting(db, "portal_url", (request.form.get("portal_url") or "").strip().rstrip("/")[:200])
+            _k = (request.form.get("portal_api_key") or "").strip()
+            if _k:   # فاضي = أبقِ المفتاح القديم (ما نعرضه بالصفحة)
+                set_setting(db, "portal_api_key", _k[:200])
+            set_setting(db, "portal_default_hours", str(max(0, min(240, float(request.form.get("portal_default_hours") or 2)))))
+            set_setting(db, "portal_tat_overrides", (request.form.get("portal_tat_overrides") or "")[:2000])
+            _rw = request.form.get("portal_ready_when", "completed")
+            set_setting(db, "portal_ready_when", _rw if _rw in ("completed", "verified") else "completed")
+            set_setting(db, "portal_pdf_enabled", "1" if request.form.get("portal_pdf_enabled") else "0")
+            _pm = request.form.get("portal_mode", "local")
+            set_setting(db, "portal_mode", "remote" if _pm == "remote" else "local")
+            try:
+                set_setting(db, "portal_retention_days", str(max(1, min(365, int(float(request.form.get("portal_retention_days") or 30))))))
+            except ValueError:
+                set_setting(db, "portal_retention_days", "30")
+            cloud_sync.trigger()
+
         pi_gap_raw = request.form.get("patient_info_top_gap", "").strip()
         if pi_gap_raw:
             try:
@@ -8888,6 +9246,20 @@ def app_settings():
         "dashboard_bg_size_mode": get_setting(db, "dashboard_bg_size_mode", "cover"),
         "dashboard_bg_size_percent": get_setting(db, "dashboard_bg_size_percent", "100"),
         "report_row_pad": get_setting(db, "report_row_pad", "5"),
+        "sample_no_reset": get_setting(db, "sample_no_reset", "daily"),
+        "sample_no_date_part": get_setting(db, "sample_no_date_part", "none"),
+        "sample_no_prefix": get_setting(db, "sample_no_prefix", ""),
+        "sample_no_padding": get_setting(db, "sample_no_padding", "3"),
+        "sample_no_next": peek_next_sample_no(db),
+        "portal_enabled": get_setting(db, "portal_enabled", "0") == "1",
+        "portal_url": get_setting(db, "portal_url", ""),
+        "portal_key_set": bool(get_setting(db, "portal_api_key", "")),
+        "portal_default_hours": get_setting(db, "portal_default_hours", "2"),
+        "portal_tat_overrides": get_setting(db, "portal_tat_overrides", ""),
+        "portal_ready_when": get_setting(db, "portal_ready_when", "completed"),
+        "portal_pdf_enabled": get_setting(db, "portal_pdf_enabled", "1") == "1",
+        "portal_mode": "remote" if get_setting(db, "portal_mode", "local") == "remote" else "local",
+        "portal_retention_days": get_setting(db, "portal_retention_days", "30"),
         "patient_info_top_gap": get_setting(db, "patient_info_top_gap", "4"),
         "patient_info_label_width": get_setting(db, "patient_info_label_width", "108"),
         "patient_info_row_gap": get_setting(db, "patient_info_row_gap", "3"),
@@ -9816,6 +10188,9 @@ def report_designer():
         tests_status=tests_status, selected_test=selected_test,
         selected_parameters=ordered_selected_params, selected_template=selected_template,
         selected_rows_by_param=selected_rows_by_param,
+        result_layout=get_result_layout(db), result_label_defaults=RESULT_LABEL_DEFAULTS,
+        merged_exclude_default=", ".join(MERGED_EXCLUDE_DEFAULT),
+        result_extra_values=get_extra_col_values(db),
     )
 
 
@@ -9911,6 +10286,9 @@ def _preview_report_design_impl(test_definition_id):
         custom_rows_align = custom_template["rows_align"] or "right"
         row_defs = json.loads(custom_template["rows_json"] or "[]")
         custom_rows = [{
+            "name": resolve_label(params_by_name_row.get(rd.get("param_name", "")), rd.get("label")),
+            "history": [], "extras": {}, "note": None, "note_key": None, "show_blank": True,
+            "value2": None, "range2": None,
             "label": resolve_label(params_by_name_row.get(rd.get("param_name", "")), rd.get("label")),
             "result": "—", "unit": units_by_name.get(rd.get("param_name", ""), ""),
             "normal_range": "—", "range_tiers": [{"label": None, "value": "—"}],
@@ -9926,6 +10304,17 @@ def _preview_report_design_impl(test_definition_id):
         } for rd in row_defs]
 
     params = {p["name"]: "—" for p in parameters}
+    # تعديل: كانت ranges={} وresults_by_name={} فاضيتين تمامًا بهذي المعاينة
+    # -- بالنسبة لقوالب exam_report_shared.html (فحص عام/custom_v2، وهذا
+    # يشمل قسم "Other Results" اللي فيه أي باراميتر حر مثل d.dimer أو
+    # fibrinogen)، عمود النتيجة (rval) وعمود المدى الطبيعي (rnorm) يعتمدون
+    # حصرًا على results_by_name/ranges -- فكانا يطلعان فاضيين بالكامل بهذي
+    # المعاينة تحديدًا، فما تقدر أصلاً تشوف شكل/موضع "النتيجة" أو "Normal
+    # Range" وأنت تصمم، حتى لو التخطيط نفسه (اسم / نتيجة / مدى طبيعي) كان
+    # صحيح أصلاً بالكود. صارت تُملأ بقيم وهمية واضحة (— للقيمة، ومدى نصي
+    # وهمي) لكل باراميتر، بما فيها باراميترات "Other Results" الحرة.
+    ranges = {p["name"]: {"range_text": "— إلى —", "low": None, "high": None} for p in parameters}
+    results_by_name = {p["name"]: {"value_text": "—", "value_numeric": None, "flag": None} for p in parameters}
 
     # نفس منطق _print_report_impl بالضبط (راجع التعليق هناك) — القوالب
     # الجاهزة الحديثة (GUE/GSE/SFA وأي قالب مستقبلي بنفس نمط
@@ -9940,9 +10329,10 @@ def _preview_report_design_impl(test_definition_id):
     auto_flag_color_enabled, show_result_flag, flag_color_map = get_report_flag_settings(db)
     return render_template(
         template_name,
-        ot={"test_name": test["name"], "test_code": test["code"]}, params=params, ranges={}, units=units_by_name, cbc_groups=cbc_groups,
+        ot={"test_name": test["name"], "test_code": test["code"]}, params=params, ranges=ranges, units=units_by_name, cbc_groups=cbc_groups,
         custom_rows=custom_rows, custom_heading=custom_heading,
         custom_heading_align=custom_heading_align, custom_rows_align=custom_rows_align,
+        layout_view=build_layout_view(db), note_visit_id=None,
         show_prev_values=show_prev_values, previous_visit_date=None, previous_values={},
         repeat_header_on_print=department_shows_previous_values(test["department"]),
         logo_url=logo_url, from_other_lab=False, font_size=14 if test["code"] == "CBC" else 16,
@@ -9957,13 +10347,240 @@ def _preview_report_design_impl(test_definition_id):
         referring_doctor_name="—", is_design_preview=True, preview_test_id=test_definition_id,
         test_definition_id=test_definition_id,
         sample_no="—", sample_time="—", number_of="—", patient_name_en="",
-        order_test_id=0, results_by_name={}, param_notes={},
+        order_test_id=0, results_by_name=results_by_name, param_notes={},
         auto_flag_color_enabled=auto_flag_color_enabled, show_result_flag=show_result_flag, AUTO_FLAG_COLORS=flag_color_map,
         row_spacing_px=row_spacing_px_value,
         done_by_note=(test["done_by_note"] or "") if "done_by_note" in test.keys() else "",
         report_layout=report_layout, report_layout_has_patient_override=report_layout_has_patient_override,
         macro_params=macro_params, micro_params=micro_params,
         params_list=parameters,
+    )
+
+
+# ============== أسلوب جدول النتائج: حفظ الإعدادات + معاينة حيّة + ملاحظات الصفوف ==============
+@app.route("/reports/row-note", methods=["POST"])
+@login_required
+def save_report_row_note():
+    """يحفظ/يحذف ملاحظة (أو تعليق) تحت تحليل بتقرير زيارة معيّنة. تظهر بالطباعة
+    فقط لو show=true. العنوان (label) اختياري: فاضي = بدون عنوان."""
+    data = request.get_json(silent=True) or {}
+    try:
+        visit_id = int(data.get("visit_id"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "رقم الزيارة غير صالح"}, 400
+    key = str(data.get("key") or "").strip()
+    if "|" not in key or len(key) > 300:
+        return {"ok": False, "error": "مفتاح الصف غير صالح"}, 400
+    db = get_db()
+    if not db.execute("SELECT id FROM visits WHERE id=?", (visit_id,)).fetchone():
+        return {"ok": False, "error": "الزيارة غير موجودة"}, 404
+    text = str(data.get("text") or "")[:2000]
+    label = str(data.get("label") or "")[:60]
+    save_row_note(db, visit_id, key, text, label, bool(data.get("show")))
+    log_action("SaveReportRowNote", "visit", visit_id, key)
+    return {"ok": True}
+
+
+@app.route("/management/report-designer/result-style", methods=["POST"])
+@roles_required("admin")
+def save_result_style_settings():
+    db = get_db()
+    if request.form.get("reset"):
+        set_setting(db, "result_layout_json", "")
+        db.commit()
+        flash("رجعت إعدادات أسلوب جدول النتائج للافتراضي (Style B — matching image 1).")
+        return redirect(url_for("report_designer"))
+    cfg = get_result_layout(db)
+    style = request.form.get("style", cfg["style"])
+    cfg["style"] = style if style in RESULT_STYLES else cfg["style"]
+
+    labels = {}
+    for st, defaults in RESULT_LABEL_DEFAULTS.items():
+        row = {}
+        for k, dv in defaults.items():
+            v = (request.form.get(f"label_{st}_{k}") or "").strip()
+            if v and v != dv:
+                row[k] = v[:60]
+        if row:
+            labels[st] = row
+    cfg["labels"] = labels
+
+    extra_cols = []
+    try:
+        n = int(request.form.get("xc_count", "0"))
+    except ValueError:
+        n = 0
+    for i in range(n):
+        if request.form.get(f"xc_del_{i}"):
+            continue
+        eid = (request.form.get(f"xc_id_{i}") or "").strip()
+        title = (request.form.get(f"xc_title_{i}") or "").strip()
+        if not eid or not title:
+            continue
+        after = request.form.get(f"xc_after_{i}", "test")
+        extra_cols.append({"id": eid, "title": title[:40],
+                           "after": after if after in ("test", "result", "unit", "range") else "test",
+                           "show": 1 if request.form.get(f"xc_show_{i}") else 0})
+    new_title = (request.form.get("xc_new_title") or "").strip()
+    if new_title:
+        after = request.form.get("xc_new_after", "test")
+        extra_cols.append({"id": "x" + str(int(datetime.now().timestamp() * 1000))[-9:], "title": new_title[:40],
+                           "after": after if after in ("test", "result", "unit", "range") else "test", "show": 1})
+    cfg["extra_cols"] = extra_cols
+
+    colors = {k: "" for k in cfg["colors"]}
+    if request.form.get("colors_enabled"):
+        for k in colors:
+            v = (request.form.get(f"color_{k}") or "").strip()
+            if re.fullmatch(r"#[0-9A-Fa-f]{6}", v):
+                colors[k] = v
+    cfg["colors"] = colors
+
+    try:
+        cfg["prev_count"] = max(0, min(20, int(request.form.get("prev_count", cfg["prev_count"]))))
+    except ValueError:
+        pass
+    cfg["prev_default_show"] = 1 if request.form.get("prev_default_show") else 0
+    try:
+        cfg["unit_gap"] = max(0, min(40, int(request.form.get("unit_gap", cfg.get("unit_gap", 6)))))
+    except (TypeError, ValueError):
+        pass
+    _th = request.form.get("theme", cfg["theme"])
+    cfg["theme"] = _th if _th in ("default", "green", "custom") else "default"
+    _po = request.form.get("prev_order", cfg["prev_order"])
+    cfg["prev_order"] = _po if _po in ("asc", "desc") else "desc"
+    _dh = request.form.get("dept_headings", cfg["dept_headings"])
+    cfg["dept_headings"] = _dh if _dh in ("auto", "show", "hide") else "auto"
+    cfg["merged_title"] = (request.form.get("merged_title") or "").strip()[:120]
+    cfg["merged_exclude"] = (request.form.get("merged_exclude") or "").strip()[:2000]
+    cfg["show_prev_visit_line"] = 1 if request.form.get("show_prev_visit_line") else 0
+    save_result_layout(db, cfg)
+    log_action("SaveResultStyle", "settings", 0, cfg["style"])
+    flash("تم حفظ أسلوب جدول النتائج (يُطبّق على كل التقارير).")
+    return redirect(url_for("report_designer"))
+
+
+@app.route("/management/report-designer/extra-values", methods=["POST"])
+@roles_required("admin")
+def save_result_extra_values():
+    """قيم الأعمدة الإضافية لباراميترات تحليل معيّن (نص حر لكل باراميتر)."""
+    db = get_db()
+    try:
+        test_id = int(request.form.get("test_definition_id"))
+    except (TypeError, ValueError):
+        return redirect(url_for("report_designer"))
+    params = db.execute("SELECT id, name FROM test_parameters WHERE test_definition_id=?", (test_id,)).fetchall()
+    cfg = get_result_layout(db)
+    data = get_extra_col_values(db)
+    for c in cfg["extra_cols"]:
+        mp = dict(data.get(c["id"], {}))
+        for p in params:
+            key = f"{test_id}|{p['name']}"
+            v = (request.form.get(f"ev_{c['id']}_{p['id']}") or "").strip()
+            if v:
+                mp[key] = v[:120]
+            else:
+                mp.pop(key, None)
+        data[c["id"]] = mp
+    save_extra_col_values(db, data)
+    log_action("SaveResultExtraValues", "test_definition", test_id, "extra_cols")
+    flash("تم حفظ قيم الأعمدة الإضافية لهذا التحليل.")
+    return redirect(url_for("report_designer", test_definition_id=test_id))
+
+
+def _sample_panel_groups(style, prev_count, show_prev, prev_order="desc"):
+    """بيانات المعاينة — نفس البيانات الظاهرة بالصور المرجعية للأساليب الأربعة."""
+    def hist(pairs):
+        pairs = list(pairs)[:prev_count] if show_prev else []
+        if prev_order == "asc":
+            pairs = list(reversed(pairs))
+        return [{"date": d, "value": v, "value2": v2} for d, v, v2 in pairs]
+
+    def row(name, res, unit, rng, v2=None, u2=None, r2=None, h=(), tier=None, flag=None, key=None):
+        return {"name": name, "result": res, "unit": unit, "range_display": rng,
+                "range_tiers": tier or [{"label": None, "value": rng}], "flag": flag, "value2": v2, "unit2": u2,
+                "range2_display": r2, "range2": r2, "color": None, "history": hist(h),
+                "extras": {}, "note": None, "note_key": key}
+
+    def grp(title, rows):
+        return {"department": title, "rows": rows, "name_header": "Test Name", "range_header": "Normal Range"}
+
+    if style in ("a1", "a2"):
+        return [
+            grp("Biochemistry Tests", [
+                row("FBS", "1122.0", "mg/dL", "70.0 - 100.0", h=[("10/05/2026", "105.0", None)], flag="High", key="s|fbs"),
+                row("S. Creatinine", "1.10", "mg/dL", "0.70 - 1.30", key="s|cr")]),
+            grp("Hormones Tests", [row("TSH", "2.45", "µIU/mL", "0.27 - 4.20", h=[("14/01/2026", "3.10", None)], key="s|tsh")]),
+            grp("Vitamins Tests", [row("Vitamin D3 (25-OH)", "18.50", "ng/mL", "30.0 - 100.0", flag="Low", key="s|vd")]),
+            grp("Virology Screening", [row("HBsAg", "Non-Reactive", "Index (0.15)", "Non-Reactive (< 1.0)", key="s|hbs")]),
+            grp("Tumor Markers", [row("CEA", "1.57", "ng/mL", "Nonsmoker < 3.00 / Smoker < 6.20",
+                                      h=[("14/02/2026", "1.65", None), ("09/08/2025", "1.49", None)], key="s|cea")]),
+            grp("Coagulation Profile", [
+                row("PT", "13.2", "sec", "11.0 - 14.0", h=[("01/03/2026", "12.8", None)], key="s|pt"),
+                row("INR", "1.02", "", "0.9 - 1.1", key="s|inr")]),
+        ]
+    if style == "b_grid":
+        rows = [
+            row("Bilirubin Total, Serum", "0.45", "mg/dL", "<1.00", "7.65", "umol/L", "<17.00",
+                [("14/02/2026", "0.31", "5.27"), ("09/08/2025", "0.30", "5.10")], key="s|bt"),
+            row("Bilirubin Direct, Serum", "0.17", "mg/dL", "0.00 - 0.30", "2.89", "umol/L", "0.00 - 5.10",
+                [("14/02/2026", "0.14", "2.38"), ("09/08/2025", "0.10", "1.70")], key="s|bd"),
+            row("Ferritin, Serum", "127", "ng/mL", "30.0 - 400.0",
+                h=[("14/02/2026", "115", None), ("09/08/2025", "100", None)], key="s|fe"),
+            row("Vitamin B12, Serum", "607", "pg/mL", "178 - 870", "448", "pmol/L", "131 - 642",
+                [("14/02/2026", "581", "429"), ("09/08/2025", "527", "389")], key="s|b12"),
+        ]
+        return [grp("Biochemistry", rows)]
+    rows = [
+        row("Bilirubin Total, Serum", "0.45", "mg/dL", "<1.00", "7.65", "umol/L", "<17.00",
+            [("14/02/2026", "0.31", "5.27"), ("09/08/2025", "0.30", "5.10")], key="s|bt"),
+        row("Ferritin, Serum", "127", "ng/mL", "30.0 - 400.0",
+            h=[("14/02/2026", "115", None), ("09/08/2025", "100", None)], key="s|fe"),
+        row("TSH, Serum", "1.22", "uIU/mL", "0.27 - 4.20",
+            h=[("14/02/2026", "1.49", None), ("09/08/2025", "1.95", None)], key="s|tsh"),
+        row("Vitamin D, Serum", "32", "ng/mL", "", "77", "nmol/L", None,
+            [("14/02/2026", "54", "130"), ("09/08/2025", "34", "82")],
+            tier=[{"label": "Optimal", "value": "20.00-50.00"}, {"label": "Optimal", "value": "50.00-125.00"}], key="s|vd"),
+        row("HBsAg, Serum", "Negative", "", "Negative", h=[("14/02/2026", "Negative", None)], key="s|hbs"),
+    ]
+    return [grp("Biochemistry", rows)]
+
+
+@app.route("/management/report-designer/style-preview")
+@roles_required("admin")
+def result_style_preview():
+    """معاينة حيّة لأسلوب جدول النتائج (iframe بصفحة تصميم التقارير) — نفس combined_panel.html
+    ونفس القالب المشترك بالضبط. ?style= ?theme= للمعاينة بدون حفظ، ?prev=0 لإخفاء السابقة."""
+    db = get_db()
+    cfg = get_result_layout(db)
+    view = build_layout_view(db, style_override=request.args.get("style"), cfg=cfg,
+                             theme_override=request.args.get("theme"))
+    show_prev = request.args.get("prev", "1") != "0" and cfg["prev_count"] > 0
+    groups = _sample_panel_groups(view["style"], cfg["prev_count"], show_prev, cfg["prev_order"])
+    for g in groups:
+        for r in g["rows"]:
+            for c in cfg["extra_cols"]:
+                r["extras"][c["id"]] = "—" if c.get("show") else ""
+    # في المعاينة نفعّل تلوين الـHigh/Low حتى يظهر مثل الصور المرجعية
+    flag_red = "#DC2626" if view["theme"] == "green" else "#B91C1C"
+    show_headings = cfg["dept_headings"] == "show" or (cfg["dept_headings"] == "auto" and view["style"] in ("a1", "a2"))
+    _, show_result_flag, _ = get_report_flag_settings(db)
+    logo_path = get_setting(db, "logo_path", "")
+    logo_url = url_for("static", filename=logo_path) if logo_path else None
+    return render_template(
+        "reports/combined_panel.html",
+        panel_groups=groups, all_rows=[r for g in groups for r in g["rows"]], show_dept_headings=show_headings,
+        merged_title=cfg["merged_title"], logo_url=logo_url, from_other_lab=False,
+        layout_view=view, note_visit_id=None, prev_toggle_available=False, show_prev_values=show_prev,
+        report_layout={}, report_layout_has_patient_override=False,
+        visit_date="28/9/2026", sex="Male", age="45 Year",
+        patient_name="أحمد كريم جاسم", patient_name_en="Ahmed Kareem Jasim", patient_id="19010",
+        sample_no="19010023", sample_time="09:12", number_of="1", referring_doctor_name="د. سالم راضي",
+        show_exam_signature=False, is_design_preview=True, preview_test_id=None,
+        auto_flag_color_enabled=True, show_result_flag=show_result_flag,
+        AUTO_FLAG_COLORS={"High": flag_red, "Low": flag_red, "Critical": flag_red},
+        row_spacing_px=None, done_by_notes=[],
+        stamp_target_type="visit", stamp_target_id=0, digital_stamps=[], stamp_placements=[],
     )
 
 
@@ -10017,9 +10634,136 @@ def set_test_report_header_style(test_id):
     return {"ok": True, "value": value}
 
 
+# ============== بوابة النتائج السحابية (QR للمريض) ==============
+def _portal_collect(db, visit_id):
+    """يجمع بيانات الزيارة لبوابة المريض، بنفس دالة بناء صفوف التقارير (أرقام/وحدات/مدى طبيعي متطابقة)."""
+    visit = db.execute(
+        "SELECT v.*, p.full_name as patient_name, p.age, p.age_unit, p.gender "
+        "FROM visits v JOIN patients p ON p.id = v.patient_id WHERE v.id=?", (visit_id,)).fetchone()
+    if not visit:
+        return None
+    ots = db.execute(
+        "SELECT ot.*, td.code as test_code, td.name as test_name, td.department as department, "
+        "td.report_group as report_group, td.panel_color as panel_color, td.panel_page_break as panel_page_break "
+        "FROM order_tests ot JOIN test_definitions td ON td.id = ot.test_definition_id "
+        "JOIN orders o ON o.id = ot.order_id WHERE o.visit_id=? ORDER BY ot.id", (visit_id,)).fetchall()
+    tests = []
+    for ot in ots:
+        if ot["status"] in ("Cancelled", "Canceled", "Rejected"):
+            continue
+        rows = []
+        if ot["status"] in ("Completed", "Verified"):
+            rows = _build_panel_rows_for_ot(db, ot, visit, {}, {})
+        tests.append({"td_id": ot["test_definition_id"], "code": ot["test_code"], "name": ot["test_name"],
+                      "status": ot["status"], "rows": rows})
+    return {"patient_name": visit["patient_name"], "created_at": visit["created_at"], "tests": tests}
+
+
+cloud_sync.set_collector(_portal_collect)
+
+
+def _portal_make_pdf(visit_id):
+    """نسخة PDF للمريض = نفس تقارير المختبر المصممة بالضبط (نفس مولّد الأرشفة _build_combined_designed_reports_html
+    + pdf_export.html_to_pdf الموجود عندك أصلاً). تُستدعى من خيط المزامنة الخلفي، لذلك نفتح سياق طلب داخلي.
+    لا تعلّم التحاليل كـ"مطبوعة" (نرجّع printed_at كما كانت). ترجع bytes أو None."""
+    import pdf_export
+    base = f"http://127.0.0.1:{os.environ.get('LIS_PORT', '9090')}/"
+    with app.test_request_context("/", base_url=base):
+        session["interface"] = "both"
+        db = get_db()
+        prev = {r["id"]: r["printed_at"] for r in db.execute(
+            "SELECT ot.id, ot.printed_at FROM order_tests ot JOIN orders o ON o.id = ot.order_id WHERE o.visit_id=?",
+            (visit_id,)).fetchall()}
+        try:
+            html_content = _build_combined_designed_reports_html(visit_id)
+        finally:
+            for otid, pa in prev.items():
+                db.execute("UPDATE order_tests SET printed_at=? WHERE id=?", (pa, otid))
+            db.commit()
+        if not html_content:
+            return None
+        pdf_path = pdf_export.make_temp_pdf_path(f"portal{visit_id}")
+        try:
+            pdf_export.html_to_pdf(html_content, request.url_root, pdf_path)
+            with open(pdf_path, "rb") as fh:
+                return fh.read()
+        finally:
+            try:
+                os.remove(pdf_path)
+            except OSError:
+                pass
+
+
+cloud_sync.set_pdf_maker(_portal_make_pdf)
+
+
+@app.route("/front-desk/visits/<int:visit_id>/portal-qr.png")
+@login_required
+def visit_portal_qr(visit_id):
+    db = get_db()
+    cfg = cloud_sync.get_cfg(db)
+    if not cfg["url"]:
+        return "Portal URL not configured", 400
+    token = cloud_sync.ensure_token(db, visit_id)
+    if not token:
+        return "Not found", 404
+    img = generate_qr(cloud_sync.portal_link(cfg, token))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png")
+
+
+@app.route("/front-desk/visits/<int:visit_id>/print/portal-qr")
+@login_required
+def print_visit_portal_qr(visit_id):
+    """ورقة QR صغيرة للمريض (غير باركود القناني). تفتح نافذة طباعة جاهزة."""
+    db = get_db()
+    cfg = cloud_sync.get_cfg(db)
+    visit = db.execute(
+        "SELECT v.*, p.full_name as patient_name FROM visits v JOIN patients p ON p.id = v.patient_id WHERE v.id=?",
+        (visit_id,)).fetchone()
+    if not visit:
+        return "Not found", 404
+    if not cfg["url"]:
+        flash("اضبط رابط بوابة النتائج أولاً من الإعدادات ← بوابة النتائج.")
+        return redirect(url_for("app_settings"))
+    token = cloud_sync.ensure_token(db, visit_id)
+    data = _portal_collect(db, visit_id) or {"tests": [], "created_at": visit["created_at"]}
+    cloud_sync.trigger()
+    return render_template("front_desk/print_portal_qr.html", visit=visit, link=cloud_sync.portal_link(cfg, token),
+                           eta=cloud_sync._eta_text(cfg, data) if data["tests"] else "",
+                           lab_name=get_setting(db, "lab_name", ""), enabled=cfg["enabled"])
+
+
+@app.route("/api/visits/<int:visit_id>/portal-sync", methods=["POST"])
+@login_required
+def api_portal_sync(visit_id):
+    db = get_db()
+    cloud_sync.ensure_token(db, visit_id)
+    ok, msg = cloud_sync.sync_visit(db, visit_id, force=True)
+    return {"ok": ok, "message": msg}, (200 if ok else 502)
+
+
+@app.route("/api/visits/<int:visit_id>/portal-revoke", methods=["POST"])
+@login_required
+def api_portal_revoke(visit_id):
+    db = get_db()
+    ok, msg = cloud_sync.revoke(db, visit_id)
+    log_action("PortalRevoke", "visit", visit_id, msg)
+    return {"ok": ok, "message": msg}
+
+
+@app.route("/api/portal/test", methods=["POST"])
+@roles_required("admin")
+def api_portal_test():
+    ok, msg = cloud_sync.test_connection(cloud_sync.get_cfg(get_db()))
+    return {"ok": ok, "message": msg}
 if __name__ == "__main__":
     init_db()
+    cloud_sync.start_worker()
     astm_host.start_listener_if_enabled()
+
 
     import threading
     threading.Thread(target=whatsapp_background_worker, daemon=True).start()

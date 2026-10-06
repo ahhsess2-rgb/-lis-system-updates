@@ -2,6 +2,164 @@
 {% block page_title %}مصمم التقارير{% endblock %}
 {% block content %}
 
+{# ====================== أسلوب جدول النتائج (عام لكل التقارير) ====================== #}
+{% set rl = result_layout %}
+<div class="card" id="resultStyleCard" style="margin-bottom:18px;">
+  <h3>🧾 أسلوب جدول النتائج — يُطبَّق على كل التقارير</h3>
+  <p class="muted" style="font-size:0.85em;">
+    اختر الشكل، غيّر أسماء الأعمدة، أضف أعمدة إضافية، تحكّم بعدد النتائج السابقة. المعاينة بالأسفل هي نفس قالب
+    الطباعة الفعلي بالضبط (مو نسخة تقريبية). الملاحظة تحت أي تحليل تُكتب من شاشة معاينة التقرير نفسه (زر 💬).
+  </p>
+  <form method="POST" action="{{ url_for('save_result_style_settings') }}" id="resultStyleForm">
+    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; margin-bottom:12px;">
+      {% for sid, title, desc in [
+        ('a1', 'Style A — Labels Set 1', 'جدول بشريط قسم غامق: Test / Result / Unit / Normal Range، والنتائج السابقة سطر تحت كل تحليل'),
+        ('a2', 'Style A — Labels Set 2', 'نفس جدول A بتسميات: Test Name / Result / Unit / Reference Range'),
+        ('b_grid', 'Style B — Matching Image 1', 'Test Name | Conventional Units | SI Units — المدى الطبيعي تحت الاسم والنتائج السابقة بنفس الأعمدة'),
+        ('b_compact', 'Style B — Compact', 'الاسم يسار والقيم يمين بنفس السطر، المدى الطبيعي ثم النتائج السابقة تحته')] %}
+      <label style="display:block; border:2px solid {{ '#26529C' if rl.style == sid else '#E2E8F0' }}; border-radius:10px; padding:10px; cursor:pointer; font-weight:normal;" class="rs-style-opt">
+        <input type="radio" name="style" value="{{ sid }}" {{ 'checked' if rl.style == sid }} onchange="rsStyleChanged(this)">
+        <b>{{ title }}</b><br><span class="muted" style="font-size:0.8em;">{{ desc }}</span>
+      </label>
+      {% endfor %}
+    </div>
+
+    <p class="muted" style="font-size:0.82em;">الصور الأربع: <b>A افتراضي</b> = Style A + الألوان الافتراضية · <b>A Custom colors</b> = Style A + Custom colors · <b>B افتراضي</b> = Style B Compact + الافتراضية · <b>B Custom colors</b> = Style B Compact + Custom colors · وStyle B Matching Image 1 = شبكة Conventional/SI.</p>
+    <h4>🏷️ أسماء الأعمدة (غيّرها كما تريد — لكل أسلوب تسمياته)</h4>
+    {% for sid, stitle in [('a1','Style A — Set 1'), ('a2','Style A — Set 2'), ('b_grid','Style B — Matching Image 1'), ('b_compact','Style B — Compact')] %}
+    <details style="margin-bottom:6px;" {{ 'open' if rl.style == sid }}>
+      <summary style="cursor:pointer;">{{ stitle }}</summary>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px; padding:8px 0;">
+        {% set eff = result_label_defaults[sid].copy() %}
+        {% for k, dv in result_label_defaults[sid].items() %}
+        {% set cur = (rl.labels.get(sid, {}).get(k)) or dv %}
+        <label style="font-weight:normal; font-size:12px;">{{ {'test':'عمود الاسم','result':'عمود النتيجة','unit':'عمود الوحدة','range':'عمود المدى','conv':'عمود Conventional','si':'عمود SI','normal_range':'تسمية "المدى الطبيعي"','previous':'تسمية "النتيجة السابقة"','control':'تسمية "Control" (التخثر)'}.get(k, k) }}
+          <input type="text" name="label_{{ sid }}_{{ k }}" value="{{ cur }}" placeholder="{{ dv }}" dir="ltr" style="width:100%;">
+        </label>
+        {% endfor %}
+      </div>
+    </details>
+    {% endfor %}
+
+    <h4 style="margin-top:14px;">➕ أعمدة إضافية</h4>
+    <p class="muted" style="font-size:0.8em;">تضيف عمود بأي اسم وبأي مكان (بعد عمود معيّن). قيمته تُكتب لكل تحليل من خانة "قيم الأعمدة الإضافية" عند اختيار التحليل بالأسفل (مثلاً Method / Sample type).</p>
+    <input type="hidden" name="xc_count" value="{{ rl.extra_cols|length }}">
+    <table>
+      <thead><tr><th>اسم العمود</th><th>مكانه</th><th>ظاهر</th><th>حذف</th></tr></thead>
+      <tbody>
+      {% for c in rl.extra_cols %}
+        <tr>
+          <td><input type="hidden" name="xc_id_{{ loop.index0 }}" value="{{ c.id }}">
+              <input type="text" name="xc_title_{{ loop.index0 }}" value="{{ c.title }}" dir="auto"></td>
+          <td><select name="xc_after_{{ loop.index0 }}">
+            {% for v, t in [('test','بعد عمود الاسم (Test)'),('result','بعد عمود النتيجة'),('unit','بعد عمود الوحدة'),('range','بعد المدى / آخر عمود')] %}
+            <option value="{{ v }}" {{ 'selected' if c.after == v }}>{{ t }}</option>{% endfor %}
+          </select></td>
+          <td><input type="checkbox" name="xc_show_{{ loop.index0 }}" {{ 'checked' if c.show }}></td>
+          <td><input type="checkbox" name="xc_del_{{ loop.index0 }}"></td>
+        </tr>
+      {% endfor %}
+        <tr>
+          <td><input type="text" name="xc_new_title" placeholder="عمود جديد (اتركه فاضي لو ما تريد)" dir="auto"></td>
+          <td><select name="xc_new_after">
+            <option value="test">بعد عمود الاسم (Test)</option><option value="result">بعد عمود النتيجة</option>
+            <option value="unit">بعد عمود الوحدة</option><option value="range">بعد المدى / آخر عمود</option>
+          </select></td><td colspan="2" class="muted" style="font-size:0.8em;">يُضاف عند الحفظ</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h4 style="margin-top:14px;">🎨 الألوان</h4>
+    <div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:6px;">
+      {% for tid, ttitle, tdesc in [('default','الألوان الافتراضية','Default colors — كما بصور Style A/B الافتراضية'),
+                                    ('green','Custom colors','شريط أخضر + أسماء بنفسجية + نتائج برتقالية — كما بصور Custom colors'),
+                                    ('custom','ألواني اليدوية','تختار الألوان بالأسفل')] %}
+      <label style="display:block; border:2px solid {{ '#26529C' if rl.theme == tid else '#E2E8F0' }}; border-radius:10px; padding:8px 12px; cursor:pointer; font-weight:normal; min-width:200px;" class="rs-theme-opt">
+        <input type="radio" name="theme" value="{{ tid }}" {{ 'checked' if rl.theme == tid }} onchange="rsThemeChanged(this)">
+        <b>{{ ttitle }}</b><br><span class="muted" style="font-size:0.78em;">{{ tdesc }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    <input type="hidden" name="colors_enabled" value="1">
+    <div style="display:flex; gap:14px; flex-wrap:wrap; margin:6px 0;">
+      {% for k, t, dv in [('head_bg','خلفية شريط القسم / عناوين الأعمدة','#14213D'),('head_text','نص شريط القسم','#FFFFFF'),('name','اسم التحليل','#14213D'),('result','قيمة النتيجة','#2347C5'),('prev','النتائج السابقة','#1D4ED8'),('label','تسمية "Normal Range"','#14213D'),('line','خط الفصل','#CBD5E1')] %}
+      <label style="font-weight:normal; font-size:12px; display:flex; gap:4px; align-items:center;">{{ t }}
+        <input type="color" name="color_{{ k }}" value="{{ rl.colors[k] or dv }}" style="width:36px; height:24px; padding:0;">
+      </label>
+      {% endfor %}
+    </div>
+    <p class="muted" style="font-size:0.8em;">الألوان اليدوية تُطبَّق فقط لما تختار "ألواني اليدوية". وتقدر تغيّر الستايل والألوان لحظة الطباعة من شريط معاينة التقرير.</p>
+
+    <label style="font-weight:normal; font-size:13px; display:flex; gap:6px; align-items:center; margin-top:10px;">
+      المسافة بين النتيجة ووحدتها (بكسل):
+      <input type="number" name="unit_gap" min="0" max="40" value="{{ rl.unit_gap }}" style="width:70px;">
+      <span class="muted" style="font-size:0.8em;">ينطبق على الأساليب الأربعة سوا، بمعزل عن اختيار الألوان/الثيم.</span>
+    </label>
+
+    <h4 style="margin-top:14px;">⏮️ النتائج السابقة</h4>
+    <div style="display:flex; gap:18px; align-items:center; flex-wrap:wrap;">
+      <label style="font-weight:normal;">العدد الافتراضي لو الموظف ما حدد بصفحة "زيارة جديدة" (اكتب 0 لإلغائها نهائيًا):
+        <input type="number" name="prev_count" min="0" max="20" value="{{ rl.prev_count }}" style="width:70px;"></label>
+      <label style="font-weight:normal;">ترتيب عرضها:
+        <select name="prev_order">
+          <option value="desc" {{ 'selected' if rl.prev_order == 'desc' }}>الأحدث أولاً</option>
+          <option value="asc" {{ 'selected' if rl.prev_order == 'asc' }}>الأقدم أولاً</option>
+        </select></label>
+      <label style="font-weight:normal; display:flex; gap:5px; align-items:center;">
+        <input type="checkbox" name="prev_default_show" {{ 'checked' if rl.prev_default_show }}> تظهر افتراضيًا عند الطباعة
+      </label>
+      <label style="font-weight:normal; display:flex; gap:5px; align-items:center;">
+        <input type="checkbox" name="show_prev_visit_line" {{ 'checked' if rl.show_prev_visit_line }}> إظهار سطر "زيارة سابقة بتاريخ: …" أسفل التقرير المفرد
+      </label>
+    </div>
+    <p class="muted" style="font-size:0.8em;">عدد الزيارات السابقة (لنفس المريض ونفس التحليل) يُحدَّد لكل زيارة من صفحة "زيارة جديدة" أو من شاشة إدخال النتائج (0 = بدون). هنا تحدد الافتراضي والترتيب فقط.</p>
+
+    <h4 style="margin-top:14px;">📄 التقرير الشامل (كل التحاليل بورقة واحدة)</h4>
+    <div class="form-field">
+      <label>عنوان التقرير</label>
+      <input type="text" name="merged_title" value="{{ rl.merged_title }}" dir="auto" style="width:100%;">
+    </div>
+    <div class="form-field">
+      <label>عناوين الأقسام (BIOCHEMISTRY / HORMONES ...) فوق التحاليل</label>
+      <select name="dept_headings">
+        <option value="auto" {{ 'selected' if rl.dept_headings == 'auto' }}>تلقائي (Style A تظهر، Style B لا)</option>
+        <option value="show" {{ 'selected' if rl.dept_headings == 'show' }}>تظهر دائمًا</option>
+        <option value="hide" {{ 'selected' if rl.dept_headings == 'hide' }}>لا تظهر أبدًا (جدول واحد)</option>
+      </select>
+    </div>
+    <div class="form-field">
+      <label>تحاليل مستثناة من التقرير الشامل (كلمة بكل سطر — تُطابَق مع كود التحليل أو اسمه)</label>
+      <textarea name="merged_exclude" rows="5" dir="ltr" style="width:100%;" placeholder="{{ merged_exclude_default }}">{{ rl.merged_exclude }}</textarea>
+      <span class="muted" style="font-size:0.8em;">فاضي = القائمة الافتراضية: CBC, Blood film, Retic, BMA, BMP, Bone marrow, Fluid, Hb.H, Electrophoresis (الأخيرة تشمل Hb وS.protein electrophoresis). التخثر يدخل تلقائيًا.</span>
+    </div>
+
+    <div style="display:flex; gap:8px; margin-top:10px;">
+      <button class="btn" type="submit">💾 حفظ أسلوب الجدول</button>
+      <button class="btn secondary" type="submit" name="reset" value="1" formnovalidate onclick="return confirm('الرجوع للإعدادات الافتراضية؟')">↩ افتراضي</button>
+    </div>
+  </form>
+
+  <h4 style="margin-top:16px;">👁️ معاينة (نفس قالب الطباعة بالضبط)</h4>
+  <iframe id="rsPreviewFrame" src="{{ url_for('result_style_preview') }}" style="width:100%; height:760px; border:1px solid #CBD5E1; border-radius:8px; background:#fff;"></iframe>
+  <script>
+    function rsReloadPreview() {
+      var st = document.querySelector('input[name=style]:checked'), th = document.querySelector('input[name=theme]:checked');
+      var q = "?style=" + encodeURIComponent(st ? st.value : '') + "&theme=" + encodeURIComponent(th ? th.value : '') + "&t=" + Date.now();
+      document.getElementById('rsPreviewFrame').src = "{{ url_for('result_style_preview') }}" + q;
+    }
+    function rsStyleChanged(inp) {
+      document.querySelectorAll('.rs-style-opt').forEach(function (l) { l.style.borderColor = '#E2E8F0'; });
+      inp.closest('label').style.borderColor = '#26529C';
+      rsReloadPreview();
+    }
+    function rsThemeChanged(inp) {
+      document.querySelectorAll('.rs-theme-opt').forEach(function (l) { l.style.borderColor = '#E2E8F0'; });
+      inp.closest('label').style.borderColor = '#26529C';
+      rsReloadPreview();
+    }
+  </script>
+</div>
+
 {% if selected_test %}
 <div class="card" id="designCard">
   <h3>تصميم تقرير: {{ selected_test['name'] }} ({{ selected_test['code'] }})</h3>
@@ -116,6 +274,58 @@
     </div>
     <button class="btn small" type="submit">حفظ التباعد</button>
   </form>
+
+  {% if selected_parameters %}
+  <div class="card" style="margin-bottom:18px; background:#F8FAFC;" id="designGallery">
+    <h4 style="margin-top:0;">🎨 معرض التصاميم الجاهزة (بدون إنترنت — فوري)</h4>
+    <p class="muted" style="font-size:0.82em; margin-bottom:12px;">
+      كل تصميم يطبَّق مباشرة على كل باراميترات هذا التحليل (يتحكم بعدد الأعمدة
+      وحجم/لون الخط فقط — لا يمسح أي تسمية بديلة أو ملاحظة سبق وضبطتها). جرّب
+      أكثر من واحد وشوف المعاينة؛ التبديل بينها فوري وبدون أي تكلفة أو انتظار.
+      اختيار "الافتراضي" يرجّع كل شي لوضعه الأصلي.
+    </p>
+    <div id="galleryGrid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px,1fr)); gap:10px;">
+      <button type="button" class="btn small secondary gallery-btn" onclick="applyDesignPreset('default')">
+        ⬜ الافتراضي<br><span style="font-weight:normal; font-size:0.78em;">عمود واحد، بدون تكبير</span>
+      </button>
+      <button type="button" class="btn small secondary gallery-btn" onclick="applyDesignPreset('two_col')">
+        ▥ عمودين متقابلين<br><span style="font-weight:normal; font-size:0.78em;">تقسيم يمين/يسار بالتناوب</span>
+      </button>
+      <button type="button" class="btn small secondary gallery-btn" onclick="applyDesignPreset('three_col')">
+        ▦ ثلاثة أعمدة مضغوطة<br><span style="font-weight:normal; font-size:0.78em;">لقوائم طويلة من الباراميترات</span>
+      </button>
+      <button type="button" class="btn small secondary gallery-btn" onclick="applyDesignPreset('bold_center')">
+        🔎 تكبير وتمييز<br><span style="font-weight:normal; font-size:0.78em;">عمود واحد، خط أكبر وملوّن</span>
+      </button>
+      <button type="button" class="btn small secondary gallery-btn" onclick="applyDesignPreset('right_compact')">
+        ➡️ مضغوط يمين بالكامل<br><span style="font-weight:normal; font-size:0.78em;">كل الباراميترات بعمود اليمين، خط أصغر</span>
+      </button>
+    </div>
+    <div id="galleryStatus" class="muted" style="font-size:0.82em; margin-top:8px;"></div>
+  </div>
+  {% endif %}
+
+  {% if selected_parameters and result_layout.extra_cols %}
+  <form method="POST" action="{{ url_for('save_result_extra_values') }}" style="margin-bottom:18px;">
+    <input type="hidden" name="test_definition_id" value="{{ selected_test['id'] }}">
+    <div class="form-field">
+      <label>➕ قيم الأعمدة الإضافية لهذا التحليل</label>
+      <span class="muted" style="font-size:0.8em; display:block; margin-bottom:8px;">اكتب القيمة اللي تظهر تحت كل عمود إضافي لكل باراميتر (فاضي = لا شي).</span>
+      <table>
+        <thead><tr><th>الباراميتر</th>{% for c in result_layout.extra_cols %}<th>{{ c.title }}</th>{% endfor %}</tr></thead>
+        <tbody>
+        {% for p in selected_parameters %}
+          <tr><td>{{ p['name'] }}</td>
+          {% for c in result_layout.extra_cols %}
+            <td><input type="text" name="ev_{{ c.id }}_{{ p['id'] }}" value="{{ (result_extra_values.get(c.id, {})).get(selected_test['id']|string ~ '|' ~ p['name'], '') }}" dir="auto" style="width:100%;"></td>
+          {% endfor %}</tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <button class="btn small" type="submit">حفظ قيم الأعمدة الإضافية</button>
+  </form>
+  {% endif %}
 
   {% if selected_parameters %}
   <form method="POST" style="margin-bottom:18px;">
@@ -377,6 +587,64 @@
 {% if selected_test %}
 <script>
   document.getElementById('designCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+</script>
+{% endif %}
+
+
+{% if selected_parameters %}
+<script>
+  var DESIGNER_TEST_ID = {{ selected_test['id'] }};
+  var DESIGNER_PARAM_NAMES = [{% for p in selected_parameters %}{{ p['name']|tojson }}{% if not loop.last %},{% endif %}{% endfor %}];
+  var DESIGNER_PREVIEW_URL = {{ url_for('preview_report_design', test_definition_id=selected_test['id'])|tojson }};
+
+  var DESIGN_PRESETS = {
+    default:       { column: null,    font_size: null, color: null },
+    two_col:       { column: 'alt2',  font_size: null, color: null },
+    three_col:     { column: 'alt3',  font_size: 13,    color: null },
+    bold_center:   { column: null,    font_size: 20,    color: '#1F3B7A' },
+    right_compact: { column: 'right', font_size: 13,    color: null },
+  };
+
+  function applyDesignPreset(name) {
+    var preset = DESIGN_PRESETS[name];
+    var statusEl = document.getElementById('galleryStatus');
+    statusEl.textContent = '⏳ جاري التطبيق...';
+    fetch('/api/reports/layout/' + DESIGNER_TEST_ID)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var layout = data.test_layout || {};
+        var overrides = Object.assign({}, layout.param_overrides || {});
+        DESIGNER_PARAM_NAMES.forEach(function (pname, idx) {
+          var row = Object.assign({}, overrides[pname] || {});
+          if (preset.column === 'alt2') {
+            row.column = (idx % 2 === 0) ? 'right' : 'left';
+          } else if (preset.column === 'alt3') {
+            row.column = ['right', 'center', 'left'][idx % 3];
+          } else if (preset.column) {
+            row.column = preset.column;
+          } else {
+            delete row.column;
+          }
+          if (preset.font_size) { row.font_size = preset.font_size; } else { delete row.font_size; }
+          if (preset.color) { row.color = preset.color; } else { delete row.color; }
+          overrides[pname] = row;
+        });
+        layout.param_overrides = overrides;
+        return fetch('/api/reports/layout', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scope: 'test', scope_id: DESIGNER_TEST_ID, layout: layout }),
+        });
+      })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res.ok) {
+          statusEl.innerHTML = '✅ تم التطبيق — <a href="' + DESIGNER_PREVIEW_URL + '" target="_blank">افتح المعاينة</a> لتشوف النتيجة.';
+        } else {
+          statusEl.textContent = '❌ ' + (res.error || 'تعذّر تطبيق التصميم.');
+        }
+      })
+      .catch(function () { statusEl.textContent = '❌ تعذّر الاتصال بالسيرفر.'; });
+  }
 </script>
 {% endif %}
 

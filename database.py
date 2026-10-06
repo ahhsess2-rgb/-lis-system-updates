@@ -502,6 +502,49 @@ CREATE TABLE IF NOT EXISTS saved_reports (
 -- يسمح بعرضه كصف "Previous" جنب تحليل مطابق بالزيارة الجديدة، أو كصف
 -- مستقل إضافي بنفس مجموعة القسم لو ما تكرر طلبه. UNIQUE يمنع تكرار نفس
 -- الموافقة مرتين لو ضغط الموظف الزر أكثر من مرة بالغلط.
+-- ملاحظة/تعليق اختياري تحت تحليل (أو باراميتر) معيّن بتقرير زيارة معيّنة.
+-- لا تظهر بالتقرير المطبوع إلا إذا show=1 (زر "إظهار الملاحظة"). label اختياري
+-- (مثلاً Note / Comment / أي عنوان يكتبه المستخدم، أو فاضي = بدون عنوان).
+-- row_key = "<test_definition_id>|<اسم الباراميتر>".
+CREATE TABLE IF NOT EXISTS report_row_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    visit_id INTEGER NOT NULL,
+    row_key TEXT NOT NULL,
+    note_text TEXT,
+    note_label TEXT,
+    show INTEGER DEFAULT 0,
+    updated_at TEXT,
+    UNIQUE(visit_id, row_key)
+);
+
+-- عدد الزيارات السابقة (لنفس المريض ونفس التحليل) اللي تظهر نتائجها بتقرير هذي
+-- الزيارة. يُحدَّد من صفحة "زيارة جديدة" (أو من شاشة إدخال النتائج لاحقًا).
+-- 0 = لا تظهر أي نتيجة سابقة. غياب السطر = السلوك القديم (موافقة الدمج فقط).
+-- حالة مزامنة كل زيارة مع بوابة النتائج السحابية: آخر حالة/بصمة اندفعت بنجاح، وعدد المحاولات الفاشلة.
+-- العامل الخلفي (cloud_sync.py) يقارن بصمة النتائج الحالية بآخر بصمة مدفوعة؛ لو اختلفت يرسل من جديد،
+-- ولو فشل (انقطاع إنترنت) يعيد المحاولة تلقائيًا لاحقًا بدون ما يضيع شي.
+CREATE TABLE IF NOT EXISTS portal_state (
+    visit_id INTEGER PRIMARY KEY,
+    last_status TEXT,
+    last_hash TEXT,
+    last_pushed_at TEXT,
+    last_error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_try_at TEXT
+);
+
+-- عدّاد تسلسل رقم العينة: صف لكل "فترة" (مثلاً 2026-09-28 للتصفير اليومي) — آخر رقم مُستخدم.
+CREATE TABLE IF NOT EXISTS sample_counters (
+    period_key TEXT PRIMARY KEY,
+    last_value INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS visit_prev_prefs (
+    visit_id INTEGER PRIMARY KEY,
+    prev_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS visit_previous_merges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     visit_id INTEGER NOT NULL,
@@ -661,7 +704,12 @@ def migrate(conn):
                     # الزيارة المنزلية (Home Visit): علامة + عنوان + أجرة إضافية
                     # خاصة بهذي الزيارة فقط.
                     ("is_home_visit", "INTEGER DEFAULT 0"), ("home_visit_address", "TEXT"),
-                    ("home_visit_fee", "REAL DEFAULT 0")],
+                    ("home_visit_fee", "REAL DEFAULT 0"),
+                    # رقم العينة (Sample No.) الخاص بالزيارة: يُدخَل/يُولَّد بصفحة "زيارة جديدة"
+                    # ويتسلسل من جديد حسب فترة التصفير بالإعدادات (يومي/شهري/سنوي/بدون).
+                    ("sample_no", "TEXT"),
+                    # رمز بوابة النتائج (QR للمريض): عشوائي طويل، يُولَّد مرة وحدة لكل زيارة (cloud_sync.py).
+                    ("portal_token", "TEXT")],
         "test_definitions": [("is_examining_test", "INTEGER DEFAULT 0"),
                                # short_name: اختصار يدوي يحدده الأدمن لهذا التحليل تحديدًا
                                # (مثال: "PT" بدل "زمن البروثرومبين") — يُستخدم فقط بملصق
@@ -812,7 +860,9 @@ def migrate(conn):
         # note: ملاحظة قصيرة أمام باراميتر واحد بالذات (زر 📝 بتقارير الفحص
         # GUE/GSE/SFA — راجع exam_row بـ exam_report_shared.html)، مستقلة
         # تمامًا عن order_tests.report_comment (الملاحظة العامة للتقرير كامل).
-        "results": [("note", "TEXT")],
+        # note_label: تسمية اختيارية للملاحظة (Comment / فاضي = بدون عنوان).
+        # note_visible: الكتابة والإظهار بالطباعة خطوتان منفصلتان (0=مخفية، 1=ظاهرة).
+        "results": [("note", "TEXT"), ("note_label", "TEXT"), ("note_visible", "INTEGER DEFAULT 0")],
     }
     for table, columns in needed.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -1526,7 +1576,45 @@ def init_db():
     ensure_cbc_comment_parameter(conn)
     ensure_coag_parameters(conn)
     ensure_vldl_parameter(conn)
+    apply_client_preset(conn)
     conn.close()
+
+
+# مفاتيح مسموح لملف التجهيز المسبق (portal_preset.json) يضبطها — لا شي غيرها.
+_PRESET_KEYS = {
+    "app_name", "app_name_ar", "lab_phone", "lab_address",
+    "portal_enabled", "portal_mode", "portal_url", "portal_api_key", "portal_pdf_enabled",
+    "portal_default_hours", "portal_ready_when", "portal_retention_days",
+}
+
+
+def apply_client_preset(conn):
+    """تجهيز عميل جديد قبل تسليمه البرنامج: ملف portal_preset.json بجانب lis.db (تنشئه أداة
+    tools/make_client_package.py) يضبط اسم المختبر وإعدادات بوابة النتائج مرة وحدة عند أول تشغيل،
+    ثم يُعاد تسميته إلى portal_preset.applied.json حتى لا يتكرر ولا يطغى على تعديلات العميل لاحقًا.
+    ما يكون أبدًا ضمن مستودع التحديثات (يحتوي مفتاح سري خاص بالعميل)."""
+    import json
+    path = os.path.join(_BASE_DIR, "portal_preset.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        values = data.get("settings", {}) if isinstance(data, dict) else {}
+        for key, value in values.items():
+            if key in _PRESET_KEYS and value is not None:
+                v = str(value).strip()
+                if key == "portal_url":
+                    v = v.rstrip("/")
+                row = conn.execute("SELECT key FROM settings WHERE key=?", (key,)).fetchone()
+                if row:
+                    conn.execute("UPDATE settings SET value=? WHERE key=?", (v, key))
+                else:
+                    conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, v))
+        conn.commit()
+        os.replace(path, os.path.join(_BASE_DIR, "portal_preset.applied.json"))
+    except (OSError, ValueError):
+        pass   # ملف تالف: نتجاهله ولا نوقف تشغيل البرنامج
 
 
 def ensure_vldl_parameter(conn):
@@ -2234,6 +2322,292 @@ def save_report_layout(db, scope, scope_id, layout_dict, user_id=None):
 def reset_report_layout(db, scope, scope_id):
     db.execute("DELETE FROM report_layout_overrides WHERE scope=? AND scope_id=?", (scope, scope_id))
     db.commit()
+
+
+# ============== أسلوب جدول النتائج (Style A / Style B) + الأعمدة الإضافية ==============
+RESULT_STYLES = ("a1", "a2", "b_grid", "b_compact")
+
+RESULT_LABEL_DEFAULTS = {
+    "a1": {"test": "Test", "result": "Result", "unit": "Unit", "range": "Normal Range",
+           "normal_range": "Normal Range", "previous": "PREVIOUS RESULT", "control": "Control"},
+    "a2": {"test": "Test Name", "result": "Result", "unit": "Unit", "range": "Reference Range",
+           "normal_range": "Reference Range", "previous": "Previous Result", "control": "Control"},
+    "b_grid": {"test": "Test Name", "conv": "Conventional Units", "si": "SI Units",
+               "normal_range": "Normal Range", "previous": "Previous Result", "control": "Control"},
+    "b_compact": {"normal_range": "Normal Range", "previous": "Previous Result", "control": "Control"},
+}
+
+RESULT_LAYOUT_DEFAULTS = {
+    "style": "b_grid",          # الافتراضي = شكل custom_v2 الحالي (Style B matching image 1)
+    "labels": {},               # style -> {key: text} تسميات مخصصة تتغلب على الافتراضي
+    "extra_cols": [],           # [{"id","title","after","show"}]
+    "colors": {"head_bg": "", "head_text": "", "name": "", "result": "", "prev": "", "line": "", "label": ""},
+    "prev_count": 2,
+    "prev_default_show": 1,
+    "theme": "default",         # default | green (ألوان الصور المخصصة) | custom (ألواني اليدوية)
+    "prev_order": "desc",       # desc = الأحدث أولاً ، asc = الأقدم أولاً
+    "dept_headings": "auto",    # auto (A نعم / B لا) | show | hide
+    "merged_title": "تقرير الكيمياء الحيوية والهرمونات والفيتامينات",
+    "merged_exclude": "",       # فاضي = القائمة الافتراضية (MERGED_EXCLUDE_DEFAULT)
+    # المسافة (بالبكسل) بين قيمة النتيجة ووحدتها -- إعداد مستقل عن الثيم (مو لون)
+    # فينطبق بكل الأحوال على الأساليب الأربعة سوا.
+    "unit_gap": 6,
+    "show_prev_visit_line": 0,  # سطر "زيارة سابقة بتاريخ: ..." القديم أسفل التقرير (اختياري، مخفي افتراضيًا)
+}
+
+
+def get_result_layout(db):
+    """إعداد أسلوب جدول النتائج (عام لكل التقارير)."""
+    raw = get_setting(db, "result_layout_json", "")
+    cfg = json.loads(json.dumps(RESULT_LAYOUT_DEFAULTS))
+    if raw:
+        try:
+            saved = json.loads(raw)
+        except (TypeError, ValueError):
+            saved = {}
+        if isinstance(saved, dict):
+            for k in ("style", "prev_count", "prev_default_show", "show_prev_visit_line", "theme", "prev_order",
+                      "dept_headings", "merged_title", "merged_exclude", "unit_gap"):
+                if k in saved:
+                    cfg[k] = saved[k]
+            if isinstance(saved.get("labels"), dict):
+                cfg["labels"] = saved["labels"]
+            if isinstance(saved.get("extra_cols"), list):
+                cfg["extra_cols"] = [c for c in saved["extra_cols"] if isinstance(c, dict) and c.get("id")]
+            if isinstance(saved.get("colors"), dict):
+                cfg["colors"].update({k: str(v) for k, v in saved["colors"].items() if k in cfg["colors"]})
+    if cfg["style"] not in RESULT_STYLES:
+        cfg["style"] = "b_grid"
+    try:
+        cfg["prev_count"] = max(0, min(20, int(cfg["prev_count"])))
+    except (TypeError, ValueError):
+        cfg["prev_count"] = 2
+    cfg["prev_default_show"] = 1 if str(cfg.get("prev_default_show", 1)) in ("1", "True", "true") else 0
+    try:
+        cfg["unit_gap"] = max(0, min(40, int(cfg.get("unit_gap", 6))))
+    except (TypeError, ValueError):
+        cfg["unit_gap"] = 6
+    if cfg["theme"] not in ("default", "green", "custom"):
+        cfg["theme"] = "default"
+    if cfg["prev_order"] not in ("asc", "desc"):
+        cfg["prev_order"] = "desc"
+    if cfg["dept_headings"] not in ("auto", "show", "hide"):
+        cfg["dept_headings"] = "auto"
+    cfg["show_prev_visit_line"] = 1 if str(cfg.get("show_prev_visit_line", 0)) in ("1", "True", "true") else 0
+    return cfg
+
+
+def effective_labels(cfg, style=None):
+    style = style or cfg["style"]
+    out = dict(RESULT_LABEL_DEFAULTS.get(style, {}))
+    for k, v in (cfg.get("labels", {}).get(style, {}) or {}).items():
+        if v is not None and str(v).strip() != "":
+            out[k] = str(v).strip()
+    return out
+
+
+def save_result_layout(db, cfg):
+    set_setting(db, "result_layout_json", json.dumps(cfg, ensure_ascii=False))
+    db.commit()
+
+
+def get_extra_col_values(db):
+    """{extra_id: {"<test_definition_id>|<param name>": نص}} — قيم الأعمدة الإضافية لكل باراميتر."""
+    raw = get_setting(db, "result_extra_values_json", "")
+    try:
+        data = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_extra_col_values(db, data):
+    set_setting(db, "result_extra_values_json", json.dumps(data, ensure_ascii=False))
+    db.commit()
+
+
+def _fmt_date_dmy(iso):
+    try:
+        dt = datetime.fromisoformat(iso)
+        return f"{dt.day:02d}/{dt.month:02d}/{dt.year}"
+    except (TypeError, ValueError):
+        return iso or ""
+
+
+def get_previous_history(db, visit_id, test_definition_id, limit=2, order="desc"):
+    """آخر `limit` نتائج سابقة لنفس المريض (نفس الشخص بالـ id أو بالاسم+العمر)
+    لنفس التحليل، من زيارات أقدم من الزيارة الحالية. ترجع
+    {اسم الباراميتر: [{"date": "14/02/2026", "value": ...}, ...]} (الأحدث أولاً)."""
+    if not limit or limit < 1:
+        return {}
+    cur = db.execute(
+        "SELECT v.created_at, v.patient_id, p.full_name, p.age FROM visits v "
+        "JOIN patients p ON p.id = v.patient_id WHERE v.id=?", (visit_id,)).fetchone()
+    if not cur:
+        return {}
+    cands = db.execute(
+        "SELECT ot.id AS otid, v.id AS vid, v.created_at FROM order_tests ot "
+        "JOIN orders o ON o.id = ot.order_id JOIN visits v ON v.id = o.visit_id "
+        "JOIN patients p ON p.id = v.patient_id "
+        "WHERE ot.test_definition_id=? AND v.id<>? AND v.created_at < ? "
+        "AND ot.status IN ('Completed','Verified') "
+        "AND (v.patient_id=? OR (LOWER(TRIM(p.full_name))=LOWER(TRIM(?)) AND p.age=?)) "
+        "ORDER BY v.created_at DESC, ot.id DESC",
+        (test_definition_id, visit_id, cur["created_at"], cur["patient_id"], cur["full_name"] or "", cur["age"]),
+    ).fetchall()
+    seen_visits, chosen = set(), []
+    for c in cands:
+        if c["vid"] in seen_visits:
+            continue
+        seen_visits.add(c["vid"])
+        chosen.append(c)
+        if len(chosen) >= limit:
+            break
+    if order == "asc":
+        chosen = list(reversed(chosen))
+    hist = {}
+    for c in chosen:
+        rows = db.execute(
+            "SELECT r.value_text, r.value_numeric, tp.name AS pname FROM results r "
+            "JOIN test_parameters tp ON tp.id = r.test_parameter_id WHERE r.order_test_id=?",
+            (c["otid"],)).fetchall()
+        for r in rows:
+            val = r["value_text"] if r["value_text"] not in (None, "") else r["value_numeric"]
+            if val in (None, ""):
+                continue
+            hist.setdefault(r["pname"], []).append({"date": _fmt_date_dmy(c["created_at"]), "value": val})
+    return hist
+
+
+def get_row_notes(db, visit_id):
+    rows = db.execute(
+        "SELECT row_key, note_text, note_label, show FROM report_row_notes WHERE visit_id=?", (visit_id,)
+    ).fetchall()
+    return {r["row_key"]: {"text": r["note_text"] or "", "label": r["note_label"] or "",
+                           "show": bool(r["show"])} for r in rows}
+
+
+def save_row_note(db, visit_id, row_key, text, label, show):
+    now = datetime.now().isoformat(timespec="seconds")
+    text = (text or "").strip()
+    if not text:
+        db.execute("DELETE FROM report_row_notes WHERE visit_id=? AND row_key=?", (visit_id, row_key))
+    else:
+        db.execute(
+            "INSERT INTO report_row_notes (visit_id, row_key, note_text, note_label, show, updated_at) "
+            "VALUES (?,?,?,?,?,?) ON CONFLICT(visit_id, row_key) DO UPDATE SET "
+            "note_text=excluded.note_text, note_label=excluded.note_label, show=excluded.show, "
+            "updated_at=excluded.updated_at",
+            (visit_id, row_key, text, (label or "").strip(), 1 if show else 0, now))
+    db.commit()
+
+
+THEME_PRESETS = {
+    "default": {},
+    # ألوان الصور "Custom colors": شريط أخضر، أسماء بنفسجية، نتائج برتقالية، سابقة بتركوازي
+    "green": {"head_bg": "#065F46", "head_text": "#FFFFFF", "name": "#6D28D9", "result": "#C2410C",
+              "prev": "#0F766E", "label": "#065F46"},
+}
+
+# تحاليل ما تدخل التقرير الشامل (تُطابَق بكود التحليل أو اسمه، حروف صغيرة/كبيرة سواء)
+MERGED_EXCLUDE_DEFAULT = [
+    "cbc", "blood film", "retic", "bma", "bmp", "bone marrow", "fluid",
+    "hb.h", "hb h", "hbh", "electroph",
+]
+
+
+def merged_exclude_keywords(cfg):
+    raw = (cfg.get("merged_exclude") or "").strip()
+    kws = [ln.strip().lower() for ln in raw.splitlines() if ln.strip()]
+    return kws or list(MERGED_EXCLUDE_DEFAULT)
+
+
+def resolve_theme_colors(cfg, theme=None):
+    theme = theme or cfg.get("theme", "default")
+    out = dict(THEME_PRESETS.get(theme, {}))
+    if theme == "custom":
+        out = {k: v for k, v in cfg.get("colors", {}).items() if v}
+    return out
+
+
+def get_visit_prev_pref(db, visit_id):
+    r = db.execute("SELECT prev_count FROM visit_prev_prefs WHERE visit_id=?", (visit_id,)).fetchone()
+    return None if r is None else int(r["prev_count"])
+
+
+def set_visit_prev_pref(db, visit_id, count):
+    count = max(0, min(20, int(count)))
+    now = datetime.now().isoformat(timespec="seconds")
+    db.execute(
+        "INSERT INTO visit_prev_prefs (visit_id, prev_count, updated_at) VALUES (?,?,?) "
+        "ON CONFLICT(visit_id) DO UPDATE SET prev_count=excluded.prev_count, updated_at=excluded.updated_at",
+        (visit_id, count, now))
+    db.commit()
+    return count
+
+
+def effective_prev_count(db, visit_id, cfg, has_merge=False):
+    """عدد الزيارات السابقة الفعلي لهذي الزيارة: اختيار الموظف إن وُجد (0 = إلغاء)،
+    وإلا لو فيه موافقة دمج قديمة → الافتراضي من الإعدادات، وإلا 0 (لا عرض تلقائي)."""
+    pref = get_visit_prev_pref(db, visit_id)
+    if pref is not None:
+        return pref
+    return cfg["prev_count"] if has_merge else 0
+
+
+# ============== رقم العينة (Sample No.) ==============
+def get_sample_no_settings(db):
+    pad = get_setting(db, "sample_no_padding", "3")
+    return {
+        "reset": get_setting(db, "sample_no_reset", "daily"),        # daily | monthly | yearly | never
+        "prefix": get_setting(db, "sample_no_prefix", ""),
+        "date_part": get_setting(db, "sample_no_date_part", "none"),  # none | yymmdd | yymm | yy
+        "padding": int(pad) if str(pad).isdigit() else 3,
+    }
+
+
+def _sample_period_key(reset, dt):
+    if reset == "daily":
+        return dt.strftime("%Y-%m-%d")
+    if reset == "monthly":
+        return dt.strftime("%Y-%m")
+    if reset == "yearly":
+        return dt.strftime("%Y")
+    return "all"
+
+
+def format_sample_no(cfg, dt, seq):
+    date_fmt = {"yymmdd": "%y%m%d", "yymm": "%y%m", "yy": "%y"}.get(cfg["date_part"], "")
+    return f"{cfg['prefix']}{dt.strftime(date_fmt) if date_fmt else ''}{str(seq).zfill(cfg['padding'])}"
+
+
+def peek_next_sample_no(db, now=None):
+    """الرقم التالي (بدون حجزه) — يظهر مسبقًا بحقل صفحة زيارة جديدة."""
+    now = now or datetime.now()
+    cfg = get_sample_no_settings(db)
+    row = db.execute("SELECT last_value FROM sample_counters WHERE period_key=?",
+                     (_sample_period_key(cfg["reset"], now),)).fetchone()
+    return format_sample_no(cfg, now, (row["last_value"] if row else 0) + 1)
+
+
+def allocate_sample_no(db, now=None):
+    """يحجز الرقم التالي فعليًا (يزيد العدّاد) ويرجّعه."""
+    now = now or datetime.now()
+    cfg = get_sample_no_settings(db)
+    key = _sample_period_key(cfg["reset"], now)
+    db.execute("INSERT OR IGNORE INTO sample_counters (period_key, last_value) VALUES (?, 0)", (key,))
+    db.execute("UPDATE sample_counters SET last_value = last_value + 1 WHERE period_key=?", (key,))
+    seq = db.execute("SELECT last_value FROM sample_counters WHERE period_key=?", (key,)).fetchone()["last_value"]
+    return format_sample_no(cfg, now, seq)
+
+
+def resolve_visit_sample_no(db, typed, now=None):
+    """النص المكتوب بالحقل: فاضي أو نفس الرقم المقترح ← نحجز الرقم التلقائي؛
+    رقم مختلف (كتبه الموظف يدويًا) ← نحفظه كما هو بدون ما نحرّك العدّاد."""
+    typed = (typed or "").strip()[:40]
+    if not typed or typed == peek_next_sample_no(db, now):
+        return allocate_sample_no(db, now)
+    return typed
 
 
 if __name__ == "__main__":

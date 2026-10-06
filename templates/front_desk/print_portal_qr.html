@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>QR نتائج المريض — {{ visit['patient_name'] }}</title>
+<style>
+  @page { size: 80mm auto; margin: 4mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Tahoma, Arial, sans-serif; margin: 0; padding: 12px; color: #111; text-align: center; }
+  .slip { width: 72mm; margin: 0 auto; }
+  .lab { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+  .name { font-size: 15px; font-weight: 700; margin: 4px 0 2px; }
+  .qr { width: 52mm; height: 52mm; image-rendering: pixelated; margin: 6px auto; display: block; }
+  .scan { font-size: 13px; font-weight: 700; margin-top: 2px; }
+  .eta { font-size: 12px; color: #444; margin-top: 4px; }
+  .hint { font-size: 10.5px; color: #555; margin-top: 6px; line-height: 1.5; }
+  .bar { margin-bottom: 14px; }
+  .bar button { font-size: 14px; padding: 6px 18px; cursor: pointer; }
+  .warn { background: #FEF3C7; border: 1px solid #F59E0B; border-radius: 6px; padding: 6px 10px; font-size: 12px; margin-bottom: 10px; }
+  @media print { .bar, .warn { display: none !important; } body { padding: 0; } }
+</style>
+</head>
+<body>
+<div class="bar"><button onclick="window.print()">🖨 طباعة</button></div>
+{% if not enabled %}
+<div class="warn">⚠️ المزامنة غير مفعّلة بالإعدادات، فالـQR لن يعرض شي إلى أن تفعّلها (الإعدادات ← بوابة النتائج).</div>
+{% endif %}
+<div class="slip">
+  {% if lab_name %}<div class="lab">{{ lab_name }}</div>{% endif %}
+  <div class="name">{{ visit['patient_name'] }}</div>
+  <img class="qr" src="{{ url_for('visit_portal_qr', visit_id=visit['id']) }}" alt="QR">
+  <div class="scan">امسح الرمز لمشاهدة نتائجك</div>
+  {% if eta %}<div class="eta">{{ eta }}</div>{% endif %}
+  <div class="hint">تظهر النتائج تلقائيًا بعد اكتمال التحاليل.<br>يلزم اتصال بالإنترنت بموبايلك.<br>الرمز خاص بك فقط — لا تشاركه.</div>
+</div>
+</body>
+</html>

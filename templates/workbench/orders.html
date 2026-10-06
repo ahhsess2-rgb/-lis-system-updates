@@ -14,7 +14,7 @@
     </div>
     <div class="form-field">
       <label>التاريخ</label>
-      <input type="date" name="date" value="{{ order_date }}" onchange="this.form.submit()" lang="en">
+      <input type="date" name="date" value="{{ order_date }}" onchange="this.form.submit()" lang="{{ lang }}">
     </div>
     {% if order_date %}
     <div class="form-field" style="align-self:end;">
@@ -45,7 +45,16 @@
         <td style="white-space:nowrap;">
           <a class="btn small" href="{{ url_for('result_entry', order_test_id=ot['id']) }}">{{ t('enter_results') }}</a>
           {% if ot['test_code'] in ('CBC', 'BF', 'WBCDIFF', 'FLUIDEXAM') and ot['status'] in ('Completed', 'Verified') %}
-          <a class="btn small" href="{{ url_for('print_report', order_test_id=ot['id']) }}">Print Report</a>
+          <a class="btn small" href="{{ url_for('print_report', order_test_id=ot['id']) }}?auto=1">Print Report</a>
+          {% endif %}
+          {% if ot['status'] in ('Completed', 'Verified') and not ot['sent_to_reception'] %}
+          <form method="POST" action="{{ url_for('send_order_test_to_reception', order_test_id=ot['id']) }}" style="display:inline">
+            <button class="btn small secondary" type="submit" title="ترسل النتيجة لشاشة الاستقبال لتُطبع وتُسلَّم للمريض، وتختفي من هذي القائمة (تبقى تظهر لو دوّرت عليها بمربع البحث)">
+              📤 أرسل للاستقبال
+            </button>
+          </form>
+          {% elif ot['sent_to_reception'] %}
+          <span class="badge" style="background:#e3f0f7;color:#1f6fa6;" title="أُرسلت للاستقبال بالفعل">📤 أُرسلت للاستقبال</span>
           {% endif %}
           {% if ot['is_examining_test'] %}
           <button type="button" class="btn small secondary" onclick="toggleFeeWaiver({{ ot['id'] }}, {{ (not ot['fee_waived'])|tojson }})">

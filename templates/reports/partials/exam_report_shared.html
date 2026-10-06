@@ -344,7 +344,7 @@
 {% set val = pmo.get(key, real_value) %}
 <div class="info-row editable-meta-row">
   <span class="info-label">{{ label }}</span><span class="info-colon">:</span>
-  <span class="info-val {{ extra_class }}" data-meta-key="{{ key }}">{{ val }}</span>
+  <span class="info-val {{ extra_class }}" data-meta-key="{{ key }}">{{ '' if val is none else val }}</span>
   <span class="meta-edit-btn" onclick="examEditInline(this.previousElementSibling)" title="تعديل">✏️</span>
 </div>
 {% endmacro %}
@@ -396,7 +396,8 @@
 {# ============== صف نتيجة مفردة ==============
    style: dict اختياري {label, color, font_size} من report_layout.param_overrides.
    is_hidden: بول — لو True يُطبع الصف مخفي (display:none) خارج وضع التعديل. #}
-{% macro exam_row(param, range_row, unit, result_value, note, order_test_id, style=none, is_hidden=false, flag=none) %}
+{% macro exam_row(param, range_row, unit, result_value, note_info, order_test_id, style=none, is_hidden=false, flag=none) %}
+{% set note_info = note_info or {'text': '', 'label': '', 'visible': false} %}
 {% set style = style or {} %}
 {% set display_name = resolve_label(param, style.get('label')) %}
 {% set normal_range = '' %}
@@ -443,11 +444,20 @@
   <span class="row-tools">
     <button type="button" class="row-style-btn" onclick="examOpenStylePopover(event, this)" title="لون / حجم / تسمية العرض">🎨</button>
     <button type="button" class="row-hide-btn" onclick="examToggleHidden(this)" title="إخفاء/إظهار هذا الصف بالتقرير">{{ '👁️' if is_hidden else '🗑️' }}</button>
-    <button type="button" class="rnote-btn" onclick="examToggleNote({{ param['id'] }}, {{ order_test_id }})" title="إضافة/تعديل ملاحظة أمام هذا الباراميتر">📝</button>
+    <button type="button" class="rnote-btn" onclick="examEditNote({{ param['id'] }}, {{ order_test_id }})" title="كتابة/تعديل نص الملاحظة (تسمية اختيارية + نص حر)">📝</button>
+    <button type="button" class="rnote-toggle-btn" data-param-id="{{ param['id'] }}"
+            onclick="examToggleNoteVisible({{ param['id'] }}, {{ order_test_id }}, this)"
+            title="إظهار/إخفاء هذه الملاحظة بالتقرير المطبوع — الكتابة لا تُظهرها تلقائيًا"
+            style="{{ '' if note_info.text else 'display:none;' }}">{{ '🙈 إخفاء الملاحظة' if note_info.visible else '👁 إظهار الملاحظة' }}</button>
     <button type="button" class="row-delete-btn" onclick="examDeleteParam({{ param['id'] }}, {{ param['name']|tojson }}, this)" title="حذف هذا الباراميتر نهائيًا من التحليل (مختلف عن الإخفاء)">❌</button>
   </span>
 </div>
-<div class="inline-note" id="exam-note-{{ param['id'] }}" style="{{ '' if note else 'display:none;' }}">{% if note %}💬 {{ note }}{% endif %}</div>
+<div class="inline-note" id="exam-note-{{ param['id'] }}"
+     data-raw-text="{{ note_info.text }}" data-raw-label="{{ note_info.label }}"
+     data-visible="{{ '1' if note_info.visible else '0' }}"
+     style="{{ '' if (note_info.text and note_info.visible) else 'display:none;' }}">
+  {% if note_info.text %}{% if note_info.label %}<b>{{ note_info.label }}:</b> {% endif %}{{ note_info.text }}{% endif %}
+</div>
 {% endmacro %}
 
 
@@ -466,7 +476,7 @@
 {% if not has_custom_column %}
   {% for name in names %}
     {% if name in params_by_name %}
-      {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name), name), param_notes.get(name, ''), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
+      {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name), name), param_notes.get(name), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
     {% endif %}
   {% endfor %}
 {% else %}
@@ -475,7 +485,7 @@
     <div class="exam-column">
       {% for name in names %}
         {% if name in params_by_name and (param_overrides.get(name, {}).get('column') or 'center') == col %}
-          {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name), name), param_notes.get(name, ''), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
+          {{ exam_row(params_by_name[name], ranges.get(name), units.get(name, ''), resolve_value(results_by_name.get(name), name), param_notes.get(name), order_test_id, param_overrides.get(name), name in hidden, (results_by_name.get(name)['flag'] if results_by_name.get(name) else none)) }}
         {% endif %}
       {% endfor %}
     </div>
@@ -780,30 +790,65 @@ function docsSave() {
 
 {% macro editor_script(order_test_id) %}
 <script>
-// ============== ملاحظة قصيرة أمام باراميتر (موجودة أصلاً، بدون تغيير) ==============
-function examToggleNote(paramId, orderTestId) {
+// ============== ملاحظة/تعليق حر تحت باراميتر — نص + تسمية اختيارية،
+// والإظهار بالتقرير المطبوع خطوة منفصلة عن الكتابة (زر 👁/🙈 لحاله) ==========
+function examRenderNoteBox(box, text, label, visible) {
+  box.innerHTML = text ? ((label ? '<b>' + label + ':</b> ' : '') + text) : '';
+  box.style.display = (text && visible) ? 'block' : 'none';
+}
+
+function examEditNote(paramId, orderTestId) {
   var box = document.getElementById('exam-note-' + paramId);
   if (!box || box.dataset.editing === '1') return;
-  var currentText = box.textContent.replace('💬', '').trim();
+  var currentText = box.dataset.rawText || '';
+  var currentLabel = box.dataset.rawLabel || '';
   box.dataset.editing = '1';
   box.style.display = 'block';
   box.innerHTML = '';
+  var labelInput = document.createElement('input');
+  labelInput.type = 'text';
+  labelInput.className = 'inline-note-label-input';
+  labelInput.placeholder = 'تسمية اختيارية (مثلاً Comment) — اتركها فاضية بدون أي عنوان';
+  labelInput.value = currentLabel;
   var ta = document.createElement('textarea');
   ta.value = currentText;
-  ta.placeholder = 'ملاحظة أمام هذا الباراميتر...';
+  ta.placeholder = 'نص الملاحظة...';
+  box.appendChild(labelInput);
   box.appendChild(ta);
   ta.focus();
-  ta.addEventListener('blur', function () {
+  function save() {
+    if (document.activeElement === labelInput || document.activeElement === ta) return;
     var note = ta.value.trim();
+    var label = labelInput.value.trim();
     fetch('/order-tests/' + orderTestId + '/param-note', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'test_parameter_id=' + encodeURIComponent(paramId) + '&note=' + encodeURIComponent(note)
+      body: 'test_parameter_id=' + encodeURIComponent(paramId) + '&note=' + encodeURIComponent(note) + '&note_label=' + encodeURIComponent(label)
     });
     box.dataset.editing = '0';
-    if (note) { box.textContent = '💬 ' + note; box.style.display = 'block'; }
-    else { box.textContent = ''; box.style.display = 'none'; }
+    box.dataset.rawText = note;
+    box.dataset.rawLabel = label;
+    var toggleBtn = document.querySelector('.rnote-toggle-btn[data-param-id="' + paramId + '"]');
+    if (toggleBtn) toggleBtn.style.display = note ? '' : 'none';
+    if (!note) { box.dataset.visible = '0'; if (toggleBtn) toggleBtn.textContent = '👁 إظهار الملاحظة'; }
+    examRenderNoteBox(box, note, label, box.dataset.visible === '1');
+  }
+  labelInput.addEventListener('blur', function () { setTimeout(save, 120); });
+  ta.addEventListener('blur', function () { setTimeout(save, 120); });
+}
+
+function examToggleNoteVisible(paramId, orderTestId, btn) {
+  var box = document.getElementById('exam-note-' + paramId);
+  if (!box || !(box.dataset.rawText || '').trim()) return;
+  var newVisible = box.dataset.visible !== '1';
+  fetch('/order-tests/' + orderTestId + '/param-note-visibility', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'test_parameter_id=' + encodeURIComponent(paramId) + '&visible=' + (newVisible ? '1' : '0')
   });
+  box.dataset.visible = newVisible ? '1' : '0';
+  examRenderNoteBox(box, box.dataset.rawText || '', box.dataset.rawLabel || '', newVisible);
+  btn.textContent = newVisible ? '🙈 إخفاء الملاحظة' : '👁 إظهار الملاحظة';
 }
 
 // ============== المطلوب 1: قلم ✏️ عام لكل تقرير بدون استثناء ==============
