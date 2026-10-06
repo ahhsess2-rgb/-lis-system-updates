@@ -1,4 +1,4 @@
-' يشغّل lis_server.bat بدون أي نافذة ظاهرة
+' Starts lis_server.bat with no visible window.
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh = CreateObject("WScript.Shell")
 sh.CurrentDirectory = fso.GetParentFolderName(WScript.ScriptFullName)

@@ -1,0 +1,59 @@
+=== LIS diagnose Mon 10/05/2026 19:53:09.03 
+folder: C:\Users\Mas\Documents\GitHub\-lis-system-updates 
+ 
+--- where python 
+C:\Python314\python.exe
+C:\Users\Mas\AppData\Local\Microsoft\WindowsApps\python.exe
+C:\Users\Mas\AppData\Local\Python\bin\python.exe
+--- where py 
+C:\Windows\py.exe
+C:\Users\Mas\AppData\Local\Microsoft\WindowsApps\py.exe
+--- venv 
+venv: no 
+.venv: no 
+ 
+--- python version 
+Python 3.14.6
+ 
+--- required files 
+OK      app.py 
+OK      database.py 
+OK      translations.py 
+OK      daily_counter.py 
+OK      excel_export.py 
+OK      astm_host.py 
+OK      accounts_search.py 
+OK      license_manager.py 
+OK      auto_updater.py 
+OK      barcode_gen.py 
+OK      pdf_export.py 
+OK      local_config.py 
+OK      lis_server.bat 
+OK      lis_server_hidden.vbs 
+ 
+--- python packages and app.py syntax 
+python 3.14.6 C:\Python314\python.exe
+OK      flask
+OK      werkzeug
+OK      markupsafe
+OK      openpyxl
+OK      docx
+OK      PIL
+OK      pdf_export
+OK      license_manager
+OK      auto_updater
+OK      barcode_gen
+app.py syntax OK
+ 
+--- port 9090 
+ 
+--- Windows Script Host enabled? (missing key = enabled) 
+
+
+ERROR: The system was unable to find the specified registry key or value.
+
+
+ERROR: The system was unable to find the specified registry key or value.
+ 
+--- last 30 lines of server_log.txt 
+server_log.txt does not exist - the hidden server was never started 
